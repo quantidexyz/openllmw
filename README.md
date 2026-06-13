@@ -31,7 +31,7 @@ Depends only on [`@quantidexyz/openllmp`](https://github.com/quantidexyz/openllm
 ## Install
 
 ```sh
-bun install github:quantidexyz/openllmw#latest
+bun install github:quantidexyz/openllmw # latest
 ```
 
 ```ts
