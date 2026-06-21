@@ -1,6 +1,6 @@
 {
   "name": "@quantidexyz/openllmw",
-  "version": "0.0.0",
+  "version": "1.4.8-security.0",
   "private": false,
   "type": "module",
   "exports": {
@@ -12,7 +12,7 @@
     "./*": "./*.ts"
   },
   "dependencies": {
-    "@quantidexyz/openllmp": "workspace:*",
+    "@quantidexyz/openllmp": "github:quantidexyz/openllmp#v1.4.8-security.0",
     "effect": ">=3.20.0"
   },
   "license": "BUSL-1.1"
