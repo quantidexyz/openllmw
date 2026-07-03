@@ -89,13 +89,17 @@ const toolUseToOpenAIToolCall = (block: {
 });
 
 const toolResultContentToString = (
-  content: {
-    type: "tool_result";
-    content: string | ReadonlyArray<{ type: "text"; text: string }>;
-  }["content"],
+  content: Extract<TAnthropicContentBlock, { type: "tool_result" }>["content"],
 ): string => {
   if (typeof content === "string") return content;
-  return content.map((b) => b.text).join("\n");
+  // A tool_result may carry image blocks alongside text — the canonical
+  // OpenAI `role: "tool"` message is text-only, so keep the text and
+  // annotate the images rather than leaking `undefined` into the join.
+  return content
+    .map((b) =>
+      b.type === "text" ? b.text : "[image content omitted from tool result]",
+    )
+    .join("\n");
 };
 
 /**
