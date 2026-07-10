@@ -60,14 +60,39 @@ const splitBetaHeader = (raw: string | null): string[] => {
     .filter((t) => t.length > 0);
 };
 
+/** Beta required for Files-API (`file_id`) sources on image/document blocks. */
+export const ANTHROPIC_FILES_API_BETA = "files-api-2025-04-14";
+
+/**
+ * True when any content block references an uploaded file (`source:
+ * {type:"file"}` on an image/document, or a `container_upload` block) —
+ * Anthropic only honours those under the Files API beta.
+ */
+const usesFilesApi = (req: TAnthropicRequest): boolean => {
+  for (const m of req.messages) {
+    if (typeof m.content === "string") continue;
+    for (const block of m.content) {
+      if (
+        (block.type === "image" || block.type === "document") &&
+        block.source.type === "file"
+      ) {
+        return true;
+      }
+      if (block.type === "container_upload") return true;
+    }
+  }
+  return false;
+};
+
 /**
  * Derive the betas implied by the request body itself, independent of
  * what the client sent. Our `TAnthropicRequest` schema is intentionally
- * minimal, so the only safe inference today is the native server-side
- * `web_search`/`web_fetch` tools (Anthropic requires the matching beta
- * for those to be honoured). Kept as a single chokepoint so future
- * schema fields (context_management, output_format, speed) extend here
- * rather than at every call site — the LiteLLM equivalent is
+ * minimal, so the safe inferences today are the native server-side
+ * `web_search`/`web_fetch` tools and Files-API (`file_id`) content
+ * sources (Anthropic requires the matching beta for those to be
+ * honoured). Kept as a single chokepoint so future schema fields
+ * (context_management, output_format, speed) extend here rather than
+ * at every call site — the LiteLLM equivalent is
  * `anthropic_beta_headers_manager.get_anthropic_beta_headers`.
  */
 const derivedBetasFor = (req: TAnthropicRequest): string[] => {
@@ -78,6 +103,7 @@ const derivedBetasFor = (req: TAnthropicRequest): string[] => {
     if (t.startsWith("web_search")) out.push("web-search-2025-03-05");
     if (t.startsWith("web_fetch")) out.push("web-fetch-2025-09-10");
   }
+  if (usesFilesApi(req)) out.push(ANTHROPIC_FILES_API_BETA);
   return out;
 };
 
@@ -88,6 +114,13 @@ export type TBetaHeaderInput = {
   readonly request: TAnthropicRequest;
   /** True when the credential is a subscription OAuth token. */
   readonly isOAuth: boolean;
+  /**
+   * Extra betas the caller derived from a NON-Anthropic-shaped inbound
+   * body (cross-wire hops, where `request` is an empty stand-in) —
+   * e.g. the Files-API beta when a canonical `file_id` part will be
+   * encoded to an Anthropic file source.
+   */
+  readonly extraBetas?: ReadonlyArray<string>;
 };
 
 /**
@@ -116,6 +149,7 @@ export const deriveAnthropicBetaHeader = (
 
   for (const token of splitBetaHeader(input.inboundBeta)) push(token);
   for (const token of derivedBetasFor(input.request)) push(token);
+  for (const token of input.extraBetas ?? []) push(token);
   if (input.isOAuth) push(ANTHROPIC_OAUTH_BETA);
 
   return out.length > 0 ? out.join(",") : undefined;

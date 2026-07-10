@@ -7,6 +7,7 @@ import { fromAnthropicMessagesRequest } from "../adapters/messages/request";
 import { fromResponsesRequest } from "../adapters/responses";
 import { normaliseAdaptiveThinking } from "./anthropic/adaptive-thinking";
 import {
+  ANTHROPIC_FILES_API_BETA,
   ANTHROPIC_OAUTH_BETA,
   deriveAnthropicBetaHeader,
 } from "./anthropic/beta-headers";
@@ -126,6 +127,20 @@ export const buildUpstreamBody = (
   );
 };
 
+/**
+ * True when a cross-wire (canonical-shaped) body carries a `file` part
+ * referencing an uploaded file — `toAnthropicRequest` encodes that to a
+ * Files-API document source, which Anthropic only honours under the
+ * Files API beta.
+ */
+const canonicalUsesFileIds = (canonical: TChatCompletionRequest): boolean =>
+  canonical.messages.some(
+    (m) =>
+      typeof m.content !== "string" &&
+      m.content != null &&
+      m.content.some((p) => p.type === "file" && p.file.file_id !== undefined),
+  );
+
 /** Wire-derived headers (layered OVER the caller's auth/identity). Only the
  *  Anthropic upstream contributes here: version + the merged `anthropic-beta`
  *  (OAuth beta + the client's inbound betas + body-derived betas). */
@@ -139,14 +154,26 @@ const wireHeaders = (
 ): Record<string, string> => {
   if (upstreamWire !== "anthropic")
     return { "content-type": "application/json" };
-  // Body-derived betas (web_search/web_fetch) only read `request.tools`; for a
-  // non-messages (cross-wire) request there's no Anthropic-shaped request, so
-  // an empty stand-in yields no false derived betas (inboundBeta is null too).
+  // Body-derived betas (web_search/web_fetch/files-api) only read the
+  // Anthropic-shaped request; for a non-messages (cross-wire) request there's
+  // no Anthropic-shaped request, so an empty stand-in yields no false derived
+  // betas — the Files-API beta is instead derived from the canonical body's
+  // `file_id` parts (which `toAnthropicRequest` encodes to file sources).
   const request =
     surface === "messages"
       ? (rawBody as TAnthropicRequest)
       : ({ model: "", messages: [], max_tokens: 0 } as TAnthropicRequest);
-  const beta = deriveAnthropicBetaHeader({ inboundBeta, request, isOAuth });
+  const extraBetas =
+    surface !== "messages" &&
+    canonicalUsesFileIds(canonicalFromInbound(surface, rawBody))
+      ? [ANTHROPIC_FILES_API_BETA]
+      : [];
+  const beta = deriveAnthropicBetaHeader({
+    inboundBeta,
+    request,
+    isOAuth,
+    extraBetas,
+  });
   return {
     "anthropic-version": apiVersion ?? DEFAULT_ANTHROPIC_VERSION,
     "content-type": "application/json",

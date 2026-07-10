@@ -6,6 +6,7 @@ import type {
   TAnthropicTool,
   TChatCompletionRequest,
   TChatMessage,
+  TFilePart,
   TToolCall,
 } from "@quantidexyz/openllmp";
 import {
@@ -84,16 +85,22 @@ const decodeBase64Utf8 = (b64: string): string => {
 
 /**
  * Map a base64 payload + media type to the Anthropic block that can
- * legally carry it: PDFs → base64 document source, text/plain → text
- * document source, anything else → text annotation. (Anthropic only
- * accepts `application/pdf` for base64 documents and `text/plain` for
- * text documents.)
+ * legally carry it: images → image block, PDFs → base64 document
+ * source, text/plain → text document source, anything else → text
+ * annotation. (Anthropic only accepts `application/pdf` for base64
+ * documents and `text/plain` for text documents.)
  */
 const base64ToDocumentBlock = (
   mediaType: string,
   data: string,
   title: string | undefined,
 ): TAnthropicContentBlock => {
+  if (mediaType.startsWith("image/")) {
+    return {
+      type: "image",
+      source: { type: "base64", media_type: mediaType, data },
+    };
+  }
   if (mediaType === "application/pdf") {
     return {
       type: "document",
@@ -102,15 +109,24 @@ const base64ToDocumentBlock = (
     };
   }
   if (mediaType === "text/plain") {
-    return {
-      type: "document",
-      source: {
+    // Malformed base64 must degrade like any other unusable payload —
+    // a throw here would 400 the whole request at the transform layer.
+    try {
+      return {
+        type: "document",
+        source: {
+          type: "text",
+          media_type: "text/plain",
+          data: decodeBase64Utf8(data),
+        },
+        ...(title !== undefined ? { title } : {}),
+      };
+    } catch {
+      return {
         type: "text",
-        media_type: "text/plain",
-        data: decodeBase64Utf8(data),
-      },
-      ...(title !== undefined ? { title } : {}),
-    };
+        text: "[file content omitted — file_data was not valid base64]",
+      };
+    }
   }
   return {
     type: "text",
@@ -147,13 +163,9 @@ const imageUrlToAnthropicBlock = (
   return withCacheControl({ type: "image", source: { type: "url", url } }, cc);
 };
 
-const filePartToAnthropicBlock = (part: {
-  readonly file: {
-    readonly file_data?: string;
-    readonly file_id?: string;
-    readonly filename?: string;
-  };
-}): TAnthropicContentBlock => {
+const filePartToAnthropicBlock = (
+  part: Pick<TFilePart, "file">,
+): TAnthropicContentBlock => {
   const { file_data, file_id, filename } = part.file;
   if (file_data !== undefined) {
     const m = DATA_URL_RE.exec(file_data);

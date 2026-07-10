@@ -7,6 +7,7 @@ import type {
   TChatMessage,
   TToolCall,
 } from "@quantidexyz/openllmp";
+import type { TCanonicalContentPart } from "../../lib/canonical/content-part";
 import { decodeReasoningSignature } from "./reasoning-signature";
 
 const extractTextFromBlocks = (
@@ -20,20 +21,13 @@ const extractTextFromBlocks = (
     .map((b) => b.text)
     .join("\n");
 
-type TCanonicalContentPart =
-  | { readonly type: "text"; readonly text: string }
-  | {
-      readonly type: "image_url";
-      readonly image_url: { readonly url: string };
-    }
-  | {
-      readonly type: "file";
-      readonly file: {
-        readonly file_data?: string;
-        readonly file_id?: string;
-        readonly filename?: string;
-      };
-    };
+/** Readable text degradation for a citable search_result block. */
+const renderSearchResult = (
+  block: Extract<TAnthropicContentBlock, { type: "search_result" }>,
+): string => {
+  const body = block.content.map((b) => b.text).join("\n");
+  return `[search result] ${block.title} (${block.source})\n${body}`;
+};
 
 /** Pull the text out of an opaque custom-content document source. */
 const extractTextFromUnknownContent = (content: unknown): string => {
@@ -65,7 +59,13 @@ const documentToCanonicalPart = (
     };
   }
   if (src.type === "file") {
-    return { type: "file", file: { file_id: src.file_id } };
+    return {
+      type: "file",
+      file: {
+        file_id: src.file_id,
+        ...(block.title != null ? { filename: block.title } : {}),
+      },
+    };
   }
   if (src.type === "text") {
     // Plain-text documents ARE text — carry the content directly.
@@ -123,11 +123,7 @@ const blockToCanonicalPart = (
     // No canonical carrier for citable search results — degrade to a
     // readable text rendering (citations are dropped cross-provider;
     // Anthropic→Anthropic passthrough keeps them intact).
-    const body = block.content.map((b) => b.text).join("\n");
-    return {
-      type: "text",
-      text: `[search result] ${block.title} (${block.source})\n${body}`,
-    };
+    return { type: "text", text: renderSearchResult(block) };
   }
   if (block.type === "container_upload") {
     return {
@@ -195,14 +191,14 @@ const toolResultContentToString = (
     .map((b) => {
       if (b.type === "text") return b.text;
       if (b.type === "document") {
-        return b.source.type === "text"
-          ? b.source.data
-          : "[document content omitted from tool result]";
+        if (b.source.type === "text") return b.source.data;
+        if (b.source.type === "content") {
+          const text = extractTextFromUnknownContent(b.source.content);
+          if (text.length > 0) return text;
+        }
+        return "[document content omitted from tool result]";
       }
-      if (b.type === "search_result") {
-        const body = b.content.map((t) => t.text).join("\n");
-        return `[search result] ${b.title} (${b.source})\n${body}`;
-      }
+      if (b.type === "search_result") return renderSearchResult(b);
       return "[image content omitted from tool result]";
     })
     .join("\n");

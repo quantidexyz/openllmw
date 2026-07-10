@@ -5,6 +5,7 @@ import type {
   TResponsesRequest,
   TToolCall,
 } from "@quantidexyz/openllmp";
+import type { TCanonicalContentPart } from "../../lib/canonical/content-part";
 
 /**
  * Inbound adapter: OpenAI **Responses API** request → canonical
@@ -24,24 +25,6 @@ import type {
  *  - flat `tools`/`tool_choice` → canonical wrapped shapes.
  *  - `reasoning.effort` → `reasoning_effort`; `max_output_tokens` → `max_tokens`.
  */
-
-type TCanonicalContentPart =
-  | { readonly type: "text"; readonly text: string }
-  | {
-      readonly type: "image_url";
-      readonly image_url: {
-        readonly url: string;
-        readonly detail?: "auto" | "low" | "high";
-      };
-    }
-  | {
-      readonly type: "file";
-      readonly file: {
-        readonly file_data?: string;
-        readonly file_id?: string;
-        readonly filename?: string;
-      };
-    };
 
 type TResponsesContentPart = Extract<
   TResponsesInputItem,
