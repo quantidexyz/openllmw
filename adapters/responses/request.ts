@@ -200,5 +200,11 @@ export const fromResponsesRequest = (
     ...(req.parallel_tool_calls != null
       ? { parallel_tool_calls: req.parallel_tool_calls }
       : {}),
+    // Preserve Codex's per-conversation prompt-cache key so the re-encoded
+    // upstream keeps routing to the same cache (rather than synthesizing a new
+    // one). Absent → `toChatGptRequest` derives a stable key from the prefix.
+    ...(req.prompt_cache_key != null
+      ? { prompt_cache_key: req.prompt_cache_key }
+      : {}),
   };
 };
