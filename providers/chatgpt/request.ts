@@ -59,6 +59,21 @@ const derivePromptCacheKey = (
   )}`;
 };
 
+/** Max `prompt_cache_key` length the OpenAI Responses backend accepts. A
+ *  longer key 400s (`prompt_cache_key` too long); the partner client clamps to
+ *  the same bound. Our synthesized key is 24 chars — this only bites a
+ *  client's forwarded key. */
+const PROMPT_CACHE_KEY_MAX = 64;
+
+/** Clamp by Unicode code point (not UTF-16 unit) so a multi-byte key isn't
+ *  split mid-character. */
+const clampPromptCacheKey = (key: string): string => {
+  const cps = Array.from(key);
+  return cps.length <= PROMPT_CACHE_KEY_MAX
+    ? key
+    : cps.slice(0, PROMPT_CACHE_KEY_MAX).join("");
+};
+
 /**
  * Coerce a `name` field to match `^[a-zA-Z0-9_-]+$`. ChatGPT 400s on
  * any other character with a `pattern` error which triggers a retry
@@ -501,10 +516,11 @@ export const toChatGptRequest = (
     // Preserve the caller's key when present (a genuine Codex request already
     // carries a stable per-thread one); otherwise synthesize one off the
     // conversation prefix so turns of the same conversation share a cache lane.
-    prompt_cache_key:
+    prompt_cache_key: clampPromptCacheKey(
       req.prompt_cache_key !== undefined && req.prompt_cache_key.length > 0
         ? req.prompt_cache_key
         : derivePromptCacheKey(instructions, conversation),
+    ),
     ...(responsesTools !== undefined ? { tools: responsesTools } : {}),
     ...(req.tool_choice !== undefined
       ? { tool_choice: toResponsesToolChoice(req.tool_choice) }

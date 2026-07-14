@@ -15,6 +15,7 @@ export * from "./adapters/messages/streaming";
 export * from "./features/compaction/compaction-text";
 export * from "./lib/canonical/message";
 export * from "./lib/canonical/token-estimate";
+export * from "./lib/encrypted-content";
 export * from "./lib/streaming/accumulate";
 export * from "./lib/streaming/sse";
 export * from "./lib/streaming/strip-tool-calls";
