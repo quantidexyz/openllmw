@@ -390,13 +390,17 @@ const toResponsesToolChoice = (
 
 // runtime-only: payload sent to `/backend-api/codex/responses`. Strictly
 // the keys allowed by `ChatGPTResponsesAPIConfig.transform_responses_api_request`
-// (`responses/transformation.py:215-227`). Anything outside this list
-// is dropped to avoid `Unsupported parameter` 400s.
+// (`responses/transformation.py:215-227`), plus `max_output_tokens`. Anything
+// outside this list is dropped to avoid `Unsupported parameter` 400s.
 //
-// Notably ABSENT: `max_output_tokens`, `temperature`, `top_p`,
-// `frequency_penalty`, `presence_penalty`, `seed`, `response_format`,
-// `metadata`, `user`. The Codex endpoint silently drops the standard
-// Responses API token-cap field, so we don't bother forwarding it.
+// Notably ABSENT: `temperature`, `top_p`, `frequency_penalty`,
+// `presence_penalty`, `seed`, `response_format`, `metadata`, `user`.
+// `temperature`/`top_p` are ACCEPTED by the Grok chat proxy (verified live
+// 2026-07-14) but stay off this wire pending a chatgpt.com probe — the Codex
+// allowed-list doesn't include them. `response_format`/`text.format` is
+// deliberately dropped: the Grok proxy accepts the field but does NOT
+// enforce it and derails into a runaway generation (a 16k-token garbage
+// completion, verified live — audit 2026-07-14 §5).
 export type TChatGptRequestBody = {
   readonly model: string;
   readonly input: ReadonlyArray<TResponsesInputItem>;
@@ -404,11 +408,23 @@ export type TChatGptRequestBody = {
   readonly stream: true;
   readonly store: false;
   readonly include: ReadonlyArray<string>;
+  // The client's token cap — emitted ONLY on the non-Codex Responses
+  // variant (`codexInstructions: false`, i.e. grok), where the chat proxy
+  // honors it as a hard cap (verified live 2026-07-14). The chatgpt.com
+  // Codex endpoint rejects it (`Unsupported parameter: max_output_tokens`),
+  // so Codex hops keep dropping it.
+  readonly max_output_tokens?: number;
   readonly tools?: ReadonlyArray<
     TResponsesToolDef | TResponsesPassthroughToolDef
   >;
   readonly tool_choice?: TResponsesToolChoice;
-  readonly reasoning?: { readonly effort: "low" | "medium" | "high" };
+  // `summary: "auto"` rides with every effort — Codex itself sends it, the
+  // Grok proxy accepts it (verified live), and the stream decoder already
+  // maps `response.reasoning_summary_text.delta` → `reasoning_content`.
+  readonly reasoning?: {
+    readonly effort: "low" | "medium" | "high";
+    readonly summary: "auto";
+  };
   readonly previous_response_id?: string;
   readonly truncation?: "auto" | "disabled";
   // Stable per-conversation prompt-cache routing hint (preserved from the
@@ -427,8 +443,9 @@ export type TChatGptRequestBody = {
  * 4. Sanitize every tool name + assistant tool_call name.
  * 5. Force `stream: true`, `store: false`,
  *    `include: ["reasoning.encrypted_content"]`.
- * 6. Map `max_tokens` / `max_completion_tokens` -> `max_output_tokens`.
- * 7. Map `reasoning_effort` -> `reasoning.effort`.
+ * 6. Map `max_tokens` / `max_completion_tokens` -> `max_output_tokens` —
+ *    non-Codex upstreams only (`codexInstructions: false`).
+ * 7. Map `reasoning_effort` -> `reasoning.effort` (+ `summary: "auto"`).
  * 8. DROP every other key — only the allowed-list is forwarded.
  *
  * Mirrors `transform_request` in `chat/transformation.py:212-248` plus
@@ -493,6 +510,13 @@ export const toChatGptRequest = (
       ? { tool_choice: toResponsesToolChoice(req.tool_choice) }
       : {}),
     ...(() => {
+      // Non-Codex Responses upstreams only (grok): the Codex backend 400s
+      // on the field, the Grok chat proxy honors it (see the type comment).
+      if (options.codexInstructions !== false) return {};
+      const cap = req.max_completion_tokens ?? req.max_tokens;
+      return cap !== undefined ? { max_output_tokens: cap } : {};
+    })(),
+    ...(() => {
       // ChatGPT's Responses API only accepts `low | medium | high`.
       // Map the wider canonical enum (`minimal/xhigh/max/none`) down to
       // the closest supported neighbour: `minimal` → low, `xhigh`/`max`
@@ -505,7 +529,7 @@ export const toChatGptRequest = (
           : e === "medium"
             ? "medium"
             : "high";
-      return { reasoning: { effort } };
+      return { reasoning: { effort, summary: "auto" as const } };
     })(),
   };
 };
