@@ -33,6 +33,24 @@ const stableHash = (s: string): string => {
 };
 
 /**
+ * Hash the IMMUTABLE conversation prefix — the first user turn's COMPLETE
+ * content plus the system `instructions` — into a stable 16-hex digest. Shared
+ * by {@link derivePromptCacheKey} and {@link deriveChatGptSessionId}: both key
+ * off this prefix (it never changes as the conversation grows), so both are
+ * stable across turns and distinct across conversations. JSON (not a delimited
+ * concat) keeps conversations that differ only by non-text parts (images/files)
+ * distinct and removes delimiter ambiguity.
+ */
+const conversationPrefixHash = (
+  conversation: ReadonlyArray<TChatMessage>,
+  instructions: string,
+): string => {
+  const firstUser = conversation.find((m) => m.role === "user");
+  const firstUserContent = firstUser !== undefined ? firstUser.content : null;
+  return stableHash(JSON.stringify({ firstUserContent, instructions }));
+};
+
+/**
  * Derive a prompt-cache key that is STABLE across every turn of one
  * conversation and DISTINCT across conversations. Codex uses its own
  * `thread_id`; the stateless gateway has none, so we key off the immutable
@@ -47,17 +65,7 @@ const stableHash = (s: string): string => {
 const derivePromptCacheKey = (
   instructions: string,
   conversation: ReadonlyArray<TChatMessage>,
-): string => {
-  const firstUser = conversation.find((m) => m.role === "user");
-  // Hash a canonical structured value (JSON), not a delimited text concat:
-  // the COMPLETE first-user content keeps conversations distinct when they
-  // differ only by non-text parts (images/files), and JSON encoding removes
-  // delimiter ambiguity.
-  const firstUserContent = firstUser !== undefined ? firstUser.content : null;
-  return `openllm-${stableHash(
-    JSON.stringify({ firstUserContent, instructions }),
-  )}`;
-};
+): string => `openllm-${conversationPrefixHash(conversation, instructions)}`;
 
 /** Max `prompt_cache_key` length the OpenAI Responses backend accepts. A
  *  longer key 400s (`prompt_cache_key` too long); the partner client clamps to
@@ -228,11 +236,7 @@ export const deriveChatGptSessionId = (req: TChatCompletionRequest): string => {
   const { conversation, instructions } = extractSystemInstructions(
     req.messages,
   );
-  const firstUser = conversation.find((m) => m.role === "user");
-  const firstUserContent = firstUser !== undefined ? firstUser.content : null;
-  return `openllm-sess-${stableHash(
-    JSON.stringify({ firstUserContent, instructions }),
-  )}`;
+  return `openllm-sess-${conversationPrefixHash(conversation, instructions)}`;
 };
 
 const TOOL_RESULT_IMAGE_REPLAY_TEXT = "Attached image(s) from tool result:";
