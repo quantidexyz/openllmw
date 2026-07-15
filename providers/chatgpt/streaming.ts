@@ -6,6 +6,7 @@ import {
   buildReasoningItem,
   type TReasoningItem,
 } from "../../adapters/messages/reasoning-signature";
+import { UpstreamStreamError } from "../../lib/streaming/upstream-error";
 
 // runtime-only: Responses API events arrive as freeform JSON dicts. We
 // hand-discriminate on the `type` field. A typed Schema would have to
@@ -381,13 +382,31 @@ export const chatGptEventToChunk = (
     const errorObj =
       objectField(event, "error") ??
       (response !== undefined ? objectField(response, "error") : undefined);
+    // `error` events carry top-level `code`/`message` (Responses spec);
+    // `response.incomplete` carries `response.incomplete_details.reason`
+    // (e.g. "max_output_tokens"). Both were previously dropped, leaving
+    // only "upstream chatgpt <type>" — the one diagnostic the client gets.
+    const incomplete =
+      response !== undefined
+        ? objectField(response, "incomplete_details")
+        : undefined;
     const message =
       (errorObj !== undefined ? stringField(errorObj, "message") : undefined) ??
+      stringField(event, "message") ??
+      (incomplete !== undefined
+        ? stringField(incomplete, "reason")
+        : undefined) ??
       `upstream chatgpt ${type}`;
     const code =
       (errorObj !== undefined ? stringField(errorObj, "type") : undefined) ??
-      "upstream_error";
-    throw new Error(`${code}: ${message}`);
+      (errorObj !== undefined ? stringField(errorObj, "code") : undefined) ??
+      stringField(event, "code") ??
+      type;
+    // Typed so downstream error handling can tell "the vendor reported an
+    // error" apart from "we could not decode the stream" (issue #274 —
+    // the web-search accumulate path used to flatten both into a generic
+    // 502 that discarded the vendor's reason).
+    throw new UpstreamStreamError(code, `${code}: ${message}`);
   }
 
   if (type === "response.completed") {

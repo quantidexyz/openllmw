@@ -92,6 +92,14 @@ export const accumulateChunksToResponse = async (
         usage = value.usage;
       }
     }
+  } catch (err) {
+    // A stream failure AFTER the terminal finish_reason chunk (a trailing
+    // upstream error event, a connection reset while draining the tail)
+    // cannot change the already-complete answer — salvage it instead of
+    // discarding the whole turn (issue #274). A failure BEFORE the terminal
+    // chunk still rejects: the answer is incomplete and the error is the
+    // only truthful outcome.
+    if (finishReason === null) throw err;
   } finally {
     // Release the underlying chunk source promptly when the caller
     // bails (deadline cutoff, response abort, …) so the upstream
