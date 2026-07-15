@@ -47,11 +47,15 @@ export const withKimiBuiltinSearch = (body: unknown): unknown => {
       fn?.name === "web_search"
     );
   });
+  // Only the EXACT `$web_search` builtin counts — another builtin function
+  // must not suppress the injection.
   const alreadyInjected = kept.some(
     (t) =>
       t !== null &&
       typeof t === "object" &&
-      (t as { readonly type?: unknown }).type === "builtin_function",
+      (t as { readonly type?: unknown }).type === "builtin_function" &&
+      (t as { readonly function?: { readonly name?: unknown } }).function
+        ?.name === "$web_search",
   );
   return {
     ...record,

@@ -213,12 +213,22 @@ const isToolCallItem = (item: Record<string, unknown>): boolean =>
 // Both map onto the canonical `server_search_calls` carrier, so the client
 // wires re-encode them exactly like Codex hosted search.
 
+/** xAI's X-search item names, pinned from the live probe. An EXPLICIT
+ *  whitelist (not an `x_` prefix match): a Codex client's own passthrough
+ *  custom tool that happens to start with `x_` must keep ordinary client-tool
+ *  semantics. A new xAI search item name must be added here to be recognised
+ *  (unlisted ones degrade to client-tool handling, never silently vanish). */
+const X_SEARCH_TOOL_NAMES: ReadonlySet<string> = new Set([
+  "x_semantic_search",
+  "x_keyword_search",
+]);
+
 const isServerSearchItem = (item: Record<string, unknown>): boolean => {
   const type = stringField(item, "type");
   if (type === "web_search_call") return true;
   return (
     type === "custom_tool_call" &&
-    (stringField(item, "name") ?? "").startsWith("x_")
+    X_SEARCH_TOOL_NAMES.has(stringField(item, "name") ?? "")
   );
 };
 
@@ -238,7 +248,7 @@ const serverSearchOfItem = (
       "";
     const sources = action?.sources;
     const results = Array.isArray(sources)
-      ? sources.flatMap((s) => {
+      ? sources.flatMap((s): Array<{ url: string }> => {
           const url =
             s !== null && typeof s === "object"
               ? stringField(s as Record<string, unknown>, "url")
