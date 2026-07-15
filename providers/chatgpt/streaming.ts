@@ -386,21 +386,32 @@ export const chatGptEventToChunk = (
     // `response.incomplete` carries `response.incomplete_details.reason`
     // (e.g. "max_output_tokens"). Both were previously dropped, leaving
     // only "upstream chatgpt <type>" — the one diagnostic the client gets.
+    // An EMPTY string field is treated as absent so the next fallback runs
+    // (a `""` message/code would otherwise win the chain and blank the
+    // diagnostic).
+    const nonEmpty = (s: string | undefined): string | undefined =>
+      s !== undefined && s.length > 0 ? s : undefined;
     const incomplete =
       response !== undefined
         ? objectField(response, "incomplete_details")
         : undefined;
     const message =
-      (errorObj !== undefined ? stringField(errorObj, "message") : undefined) ??
-      stringField(event, "message") ??
+      (errorObj !== undefined
+        ? nonEmpty(stringField(errorObj, "message"))
+        : undefined) ??
+      nonEmpty(stringField(event, "message")) ??
       (incomplete !== undefined
-        ? stringField(incomplete, "reason")
+        ? nonEmpty(stringField(incomplete, "reason"))
         : undefined) ??
       `upstream chatgpt ${type}`;
     const code =
-      (errorObj !== undefined ? stringField(errorObj, "type") : undefined) ??
-      (errorObj !== undefined ? stringField(errorObj, "code") : undefined) ??
-      stringField(event, "code") ??
+      (errorObj !== undefined
+        ? nonEmpty(stringField(errorObj, "type"))
+        : undefined) ??
+      (errorObj !== undefined
+        ? nonEmpty(stringField(errorObj, "code"))
+        : undefined) ??
+      nonEmpty(stringField(event, "code")) ??
       type;
     // Typed so downstream error handling can tell "the vendor reported an
     // error" apart from "we could not decode the stream" (issue #274 —

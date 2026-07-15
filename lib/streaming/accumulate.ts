@@ -100,6 +100,14 @@ export const accumulateChunksToResponse = async (
     // chunk still rejects: the answer is incomplete and the error is the
     // only truthful outcome.
     if (finishReason === null) throw err;
+    // Same debug gate as provider-decode's dropped-chunk warning: keep the
+    // salvage observable without adding a logger dep to the pure wire layer.
+    if (process.env.OPENLLM_DEBUG_STREAM === "1") {
+      console.warn(
+        "[accumulateChunksToResponse] salvaged completed answer after trailing stream error:",
+        err instanceof Error ? err.message : String(err),
+      );
+    }
   } finally {
     // Release the underlying chunk source promptly when the caller
     // bails (deadline cutoff, response abort, …) so the upstream
