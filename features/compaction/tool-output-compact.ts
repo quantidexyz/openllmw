@@ -105,7 +105,6 @@ const contentSlot = (
     };
   }
   if (Array.isArray(value) && value.some(isTextBlock)) {
-    const blockType = (value.find(isTextBlock) as TJsonObject).type;
     return {
       isProtected,
       read: () =>
@@ -113,11 +112,19 @@ const contentSlot = (
           .filter(isTextBlock)
           .map((b) => b.text)
           .join("\n"),
+      // The FIRST text block takes the compacted text in place (its own
+      // type and any sibling fields preserved); later text blocks drop
+      // (their content is folded into the compacted value); non-text
+      // blocks keep their original positions — an image-first array
+      // stays image-first.
       write: (next) => {
-        const nonText = (holder[key] as unknown[]).filter(
-          (b) => !isTextBlock(b),
-        );
-        holder[key] = [{ type: blockType, text: next }, ...nonText];
+        let replaced = false;
+        holder[key] = (holder[key] as unknown[]).flatMap((b) => {
+          if (!isTextBlock(b)) return [b];
+          if (replaced) return [];
+          replaced = true;
+          return [{ ...b, text: next }];
+        });
       },
     };
   }
@@ -153,43 +160,55 @@ const messagesSlots = (body: unknown): TSlot[] => {
 };
 
 /** Canonical `chat_completions` surface: `role: "tool"` messages.
- *  Protected = the trailing contiguous run of tool messages. */
+ *  Protected = tool messages after the LAST assistant message (the
+ *  pending round) — contiguity is NOT required: the client may inject
+ *  context (e.g. loaded Skill instructions as a user message) after the
+ *  pending result, and that must not demote it to clearable. */
 const chatSlots = (body: unknown): TSlot[] => {
   if (!isObj(body) || !Array.isArray(body.messages)) return [];
   const messages = body.messages;
-  let trailingStart = messages.length;
+  let lastAssistant = -1;
   for (let i = messages.length - 1; i >= 0; i--) {
-    if (!isObj(messages[i]) || (messages[i] as TJsonObject).role !== "tool")
+    if (
+      isObj(messages[i]) &&
+      (messages[i] as TJsonObject).role === "assistant"
+    ) {
+      lastAssistant = i;
       break;
-    trailingStart = i;
+    }
   }
   const slots: TSlot[] = [];
   for (const [i, m] of messages.entries()) {
     if (!isObj(m) || m.role !== "tool") continue;
-    const slot = contentSlot(m, "content", i >= trailingStart);
+    const slot = contentSlot(m, "content", i > lastAssistant);
     if (slot !== null) slots.push(slot);
   }
   return slots;
 };
 
-/** `responses` surface: `function_call_output` input items.
- *  Protected = the trailing contiguous run of them. */
+/** `responses` surface: `function_call_output` input items. Protected =
+ *  outputs after the LAST model-emitted item (a `function_call` or an
+ *  assistant `message`) — the pending round, whether or not later
+ *  client-injected context items follow it. */
 const responsesSlots = (body: unknown): TSlot[] => {
   if (!isObj(body) || !Array.isArray(body.input)) return [];
   const input = body.input;
-  let trailingStart = input.length;
+  let lastModelItem = -1;
   for (let i = input.length - 1; i >= 0; i--) {
+    const item = input[i];
+    if (!isObj(item)) continue;
     if (
-      !isObj(input[i]) ||
-      (input[i] as TJsonObject).type !== "function_call_output"
-    )
+      item.type === "function_call" ||
+      (item.type === "message" && item.role === "assistant")
+    ) {
+      lastModelItem = i;
       break;
-    trailingStart = i;
+    }
   }
   const slots: TSlot[] = [];
   for (const [i, item] of input.entries()) {
     if (!isObj(item) || item.type !== "function_call_output") continue;
-    const slot = contentSlot(item, "output", i >= trailingStart);
+    const slot = contentSlot(item, "output", i > lastModelItem);
     if (slot !== null) slots.push(slot);
   }
   return slots;
@@ -341,9 +360,15 @@ export const compactionFloorTokens = (
 ): number => {
   let floor = estimateBodyTokens(rawBody);
   for (const slot of collectSlots(surface, rawBody)) {
-    const tokens = approxTokens(slot.read());
+    const text = slot.read();
+    const tokens = approxTokens(text);
+    // Protected slots keep their ACTUAL truncated representation (header
+    // + elision marker included), not the nominal cap — the floor must
+    // never claim less than compaction can really achieve.
     const kept = slot.isProtected
-      ? Math.min(tokens, PER_TOOL_OUTPUT_TOKEN_CAP)
+      ? tokens > PER_TOOL_OUTPUT_TOKEN_CAP
+        ? approxTokens(truncateMiddleToTokens(text, PER_TOOL_OUTPUT_TOKEN_CAP))
+        : tokens
       : Math.min(tokens, approxTokens(clearedMarker(tokens)));
     floor -= tokens - kept;
   }
