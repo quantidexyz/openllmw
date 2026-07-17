@@ -1,6 +1,6 @@
 {
   "name": "@openllmsh/wire",
-  "version": "0.0.0",
+  "version": "1.6.38-registry.3",
   "private": false,
   "type": "module",
   "exports": {
@@ -12,7 +12,7 @@
     "./*": "./*.ts"
   },
   "dependencies": {
-    "@openllmsh/protocol": "workspace:*",
+    "@openllmsh/protocol": "github:openllmsh/protocol#v1.6.38-registry.3",
     "effect": ">=3.20.0"
   },
   "license": "BUSL-1.1"
