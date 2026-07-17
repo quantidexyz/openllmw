@@ -43,8 +43,11 @@ wire/
   lib/streaming/
     sse.ts                              SSE encode/decode, heartbeat + deadline wrappers, tee
     accumulate.ts                       drain a chunk stream into one non-streaming response
+    peek.ts                             pre-commit first-event peek (shared overflow-walk gate)
     strip-tool-calls.ts                 compaction tool-call removal predicates
     upstream-error.ts                   UpstreamStreamError + upstreamErrorFrom
+  features/
+    context-skip.ts                     per-hop context-skip gate (shared cloud + daemon)
   features/compaction/
     compaction-text.ts                  visible-text compaction-safety helpers
 ```

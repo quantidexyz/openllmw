@@ -5,6 +5,8 @@ import type {
   TChatCompletionChunk,
   TUsage,
 } from "@openllmsh/protocol";
+import { AnthropicStreamEvent } from "@openllmsh/protocol";
+import { decodeProviderEventStream } from "../../lib/streaming/provider-decode";
 import { UpstreamStreamError } from "../../lib/streaming/upstream-error";
 
 const compactionPayloadToText = (raw: unknown): string => {
@@ -244,3 +246,25 @@ export const fromAnthropicStreamEvent = (
 
   return null;
 };
+
+/**
+ * Decode a raw Anthropic SSE byte stream into canonical chunks — the ONE
+ * place the `(AnthropicStreamEvent, newAnthropicStreamState,
+ * fromAnthropicStreamEvent)` decode triple is wired together, shared by
+ * the daemon walker's upstream decode and the cloud dispatch chain's
+ * passthrough peek (the core provider SPEC carries the same members as
+ * data for the schema-driven runner).
+ */
+export const decodeAnthropicEventStream = (
+  raw: ReadableStream<Uint8Array>,
+  providerModelId: string,
+): ReadableStream<TChatCompletionChunk> =>
+  decodeProviderEventStream(
+    raw,
+    {
+      eventSchema: AnthropicStreamEvent,
+      initialState: newAnthropicStreamState,
+      eventToChunk: fromAnthropicStreamEvent,
+    },
+    { providerModelId },
+  );
