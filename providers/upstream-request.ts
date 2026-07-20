@@ -146,7 +146,7 @@ export const buildUpstreamBody = (
     // an empty id means "preserve the body's model", so it stays a true
     // passthrough.
     const raw = rawBody as Record<string, unknown>;
-    const effectiveStream = stream ?? (raw.stream === true);
+    const effectiveStream = stream ?? raw.stream === true;
     const pinned = {
       ...raw,
       ...(upstreamWire === "openai" && effectiveStream
@@ -241,8 +241,11 @@ export type TBuildUpstreamRequestInput = {
   readonly rawBody: unknown;
   /** Concrete upstream model id to pin. */
   readonly providerModelId: string;
-  /** The client's stream intent. */
-  readonly stream: boolean;
+  /**
+   * The client's stream intent. Undefined preserves the inbound body's stream
+   * flag for same-wire passthrough requests.
+   */
+  readonly stream: boolean | undefined;
   /**
    * Auth + identity the CALLER owns — BYOK `x-api-key` / OAuth `authorization`
    * (cloud), or the local CLI's `authorization` + vendor identity headers

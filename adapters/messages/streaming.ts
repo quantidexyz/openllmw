@@ -134,7 +134,8 @@ const emitReasoningSignature = (
 ): void => {
   if (
     state.pendingReasoningSignature === null ||
-    state.reasoningSignatureEmitted
+    state.reasoningSignatureEmitted ||
+    state.openToolContentIndexes.size > 0
   ) {
     return;
   }
@@ -307,7 +308,7 @@ export const chunkToMessagesEvents = (
     const reasoningTail = state.thinkingAccumulated.slice(
       state.thinkingDeltaEmittedLen,
     );
-    if (reasoningTail.length > 0) {
+    if (reasoningTail.length > 0 && state.openToolContentIndexes.size === 0) {
       const idx = openTextBlock(state, out);
       out.push({
         type: "content_block_delta",
@@ -346,7 +347,7 @@ export const chunkToMessagesEvents = (
     const itemsTail = state.thinkingAccumulated.slice(
       state.thinkingDeltaEmittedLen,
     );
-    if (itemsTail.length > 0) {
+    if (itemsTail.length > 0 && state.openToolContentIndexes.size === 0) {
       const idx = openTextBlock(state, out);
       out.push({
         type: "content_block_delta",
@@ -546,6 +547,25 @@ export const chunkToMessagesEvents = (
     }
     closeTextBlock(state, out);
     closeAllToolBlocks(state, out);
+    // A signature received while a tool was open is deferred with its
+    // reasoning text, then emitted only after the tool block is sealed.
+    emitReasoningSignature(state, out);
+    closeThinkingBlock(state, out);
+    const deferredReasoning = state.thinkingAccumulated.slice(
+      state.thinkingDeltaEmittedLen,
+    );
+    if (deferredReasoning.length > 0) {
+      const idx = openTextBlock(state, out);
+      out.push({
+        type: "content_block_delta",
+        index: idx,
+        delta: { type: "text_delta", text: deferredReasoning },
+      });
+      state.thinkingDeltaEmittedLen = state.thinkingAccumulated.length;
+      state.emittedNonemptyTextDelta = true;
+      state.textAccumulated += deferredReasoning;
+      closeTextBlock(state, out);
+    }
     if (
       !state.emittedNonemptyTextDelta &&
       state.thinkingAccumulated.length > 0
