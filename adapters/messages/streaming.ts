@@ -53,6 +53,8 @@ export type TMessagesStreamState = {
   thinkingBlockOpen: boolean;
   /** OpenAI tool_calls[i].index → Anthropic content_index. */
   toolCallToContentIndex: Map<number, number>;
+  /** True once any tool_use block has been emitted for this message. */
+  emittedToolUse: boolean;
   /** Anthropic content_index → still-open flag. */
   openToolContentIndexes: Set<number>;
   /** Next free Anthropic content_index. */
@@ -104,6 +106,7 @@ export const newMessagesStreamState = (): TMessagesStreamState => ({
   thinkingBlockIndex: null,
   thinkingBlockOpen: false,
   toolCallToContentIndex: new Map(),
+  emittedToolUse: false,
   openToolContentIndexes: new Set(),
   nextContentIndex: 0,
   finalStopReason: null,
@@ -300,7 +303,6 @@ export const chunkToMessagesEvents = (
     // opened by `emitReasoningSignature`. `thinkingAccumulated` /
     // `thinkingDeltaEmittedLen` stay as the reasoning-dedup ledger
     // shared with the `reasoning_items` snapshot path below.
-    closeAllToolBlocks(state, out);
     state.thinkingAccumulated += deltaReasoning;
     const reasoningTail = state.thinkingAccumulated.slice(
       state.thinkingDeltaEmittedLen,
@@ -345,7 +347,6 @@ export const chunkToMessagesEvents = (
       state.thinkingDeltaEmittedLen,
     );
     if (itemsTail.length > 0) {
-      closeAllToolBlocks(state, out);
       const idx = openTextBlock(state, out);
       out.push({
         type: "content_block_delta",
@@ -451,6 +452,7 @@ export const chunkToMessagesEvents = (
         contentIndex = state.nextContentIndex;
         state.nextContentIndex += 1;
         state.toolCallToContentIndex.set(tc.index, contentIndex);
+        state.emittedToolUse = true;
         state.openToolContentIndexes.add(contentIndex);
         out.push({
           type: "content_block_start",
@@ -522,7 +524,7 @@ export const chunkToMessagesEvents = (
     // `stop_reason: "end_turn"` alongside `tool_use` blocks and never
     // calls the tool back — observed on chatgpt.com Responses API.
     if (
-      state.toolCallToContentIndex.size > 0 &&
+      state.emittedToolUse &&
       (finalStopReason === null || finalStopReason === "end_turn")
     ) {
       finalStopReason = "tool_use";

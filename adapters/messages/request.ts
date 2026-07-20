@@ -396,7 +396,11 @@ const splitAnthropicMessage = (m: TAnthropicMessage): TChatMessage[] => {
     role: "assistant",
     content: text,
     ...(toolCalls.length > 0 ? { tool_calls: toolCalls } : {}),
-    ...(thinking.length > 0 ? { reasoning_content: thinking } : {}),
+    ...(thinking.length > 0
+      ? { reasoning_content: thinking }
+      : toolCalls.length > 0
+        ? { reasoning_content: "" }
+        : {}),
     ...(reasoningItems.length > 0 ? { reasoning_items: reasoningItems } : {}),
   };
   return [assistantMsg];

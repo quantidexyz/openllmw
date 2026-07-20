@@ -90,7 +90,16 @@ export const canonicalToUpstreamBody = (
   // `responses_tools` carrier — it's a Codex/Responses-only field that
   // chatgpt re-emits; openai-compatible upstreams 400 on the unknown key.
   const { responses_tools: _responsesTools, ...openai } = canonical;
-  return { ...openai, model: providerModelId, stream };
+  const streamOptions =
+    stream === true
+      ? { ...openai.stream_options, include_usage: true }
+      : openai.stream_options;
+  return {
+    ...openai,
+    ...(streamOptions !== undefined ? { stream_options: streamOptions } : {}),
+    model: providerModelId,
+    stream,
+  };
 };
 
 /** Inbound (client-shaped) body → an upstream body, per `(surface,
@@ -136,8 +145,18 @@ export const buildUpstreamBody = (
     // body already carries the right model) passes the body's own model — and
     // an empty id means "preserve the body's model", so it stays a true
     // passthrough.
+    const raw = rawBody as Record<string, unknown>;
+    const effectiveStream = stream ?? (raw.stream === true);
     const pinned = {
-      ...(rawBody as Record<string, unknown>),
+      ...raw,
+      ...(upstreamWire === "openai" && effectiveStream
+        ? {
+            stream_options: {
+              ...(raw.stream_options as Record<string, unknown> | undefined),
+              include_usage: true,
+            },
+          }
+        : {}),
       ...(providerModelId.length > 0 ? { model: providerModelId } : {}),
       ...(stream !== undefined ? { stream } : {}),
     };
