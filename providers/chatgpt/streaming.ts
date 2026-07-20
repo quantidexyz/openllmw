@@ -293,27 +293,33 @@ const toolCallName = (item: Record<string, unknown>): string | undefined =>
   isApplyPatchItem(item) ? "apply_patch" : stringField(item, "name");
 
 /**
- * A `custom_tool_call`'s arguments ride the JSON `input` string, not
- * `arguments`. Coerce to a JSON-object string so the canonical tool call
- * carries valid `arguments` (mirrors CLIProxyAPI `xaiCustomToolCallArguments`):
- * a valid JSON object passes through; any other string is wrapped as
- * `{"input": <text>}`; empty → `{}`.
+ * A `custom_tool_call`'s arguments ride the JSON `input`, not `arguments`.
+ * Coerce to a JSON-**object** string so the canonical tool call carries valid
+ * `arguments` (mirrors CLIProxyAPI `xaiCustomToolCallArguments`): a valid JSON
+ * OBJECT passes through; any other value (array, scalar, non-JSON text) is
+ * wrapped as `{"input": <value>}`; empty / absent → `{}`. Never returns `""`,
+ * so a parameterless custom tool call still finalizes (empty args would be
+ * skipped by {@link finalizeToolArgs} and the tool would never emit). Arrays
+ * are NOT passed through — Anthropic tool input must be an object.
  */
+const isPlainObject = (v: unknown): boolean =>
+  v !== null && typeof v === "object" && !Array.isArray(v);
+
 const customToolCallArguments = (item: Record<string, unknown>): string => {
   const raw = item.input;
-  if (raw === undefined || raw === null) return "";
+  if (raw === undefined || raw === null) return "{}";
   if (typeof raw === "string") {
     const trimmed = raw.trim();
-    if (trimmed.length === 0) return "";
+    if (trimmed.length === 0) return "{}";
     try {
       const parsed: unknown = JSON.parse(trimmed);
-      if (parsed !== null && typeof parsed === "object") return trimmed;
+      if (isPlainObject(parsed)) return trimmed;
     } catch {
       // not JSON — wrap the text below
     }
     return JSON.stringify({ input: raw });
   }
-  if (typeof raw === "object") return JSON.stringify(raw);
+  if (isPlainObject(raw)) return JSON.stringify(raw);
   return JSON.stringify({ input: raw });
 };
 
