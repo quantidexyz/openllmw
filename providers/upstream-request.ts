@@ -13,6 +13,17 @@ import {
 } from "./anthropic/beta-headers";
 import { toAnthropicRequest } from "./anthropic/request";
 import { deriveChatGptSessionId, toChatGptRequest } from "./chatgpt/request";
+import {
+  ensureClaudeCodeSystemPreamble,
+  injectGatewayPromptPrefix,
+} from "./prompt-prefix";
+
+// Re-exported for existing consumers — the definitions (and every other
+// system-prompt injection) live in `./prompt-prefix`.
+export {
+  CLAUDE_CODE_SYSTEM_PREAMBLE,
+  ensureClaudeCodeSystemPreamble,
+} from "./prompt-prefix";
 
 /**
  * The SINGLE recipe for preparing an upstream provider request from an inbound
@@ -34,57 +45,6 @@ export type TClientSurface = "messages" | "chat_completions" | "responses";
 export type TUpstreamWire = "anthropic" | "chatgpt" | "openai";
 
 const DEFAULT_ANTHROPIC_VERSION = "2023-06-01";
-
-/**
- * Anthropic's OAuth (subscription) path GATES inference on the request's FIRST
- * system block being EXACTLY this string — a `text` block, verbatim, in first
- * position (not a prefix of a bigger block, not case-folded, not second). A
- * request that lacks it comes back `429 {type:"rate_limit_error", message:
- * "Error"}` — a spoof-guard masquerading as a rate limit, NOT a real quota hit
- * (confirmed live 2026-07-17 against claude-sonnet-4-5). The genuine Claude
- * Code CLI always sends it, which is why the BRIDGE path works; the HANDROLLED
- * transport forwards the ORIGINATOR's system prompt, so a non-CLI client (or a
- * cross-wire OpenAI client) would omit it. We inject it for the OAuth Anthropic
- * upstream so handrolled reaches the vendor exactly as the bridge does. */
-export const CLAUDE_CODE_SYSTEM_PREAMBLE =
-  "You are Claude Code, Anthropic's official CLI for Claude.";
-
-type TAnthropicSystemBlock = { type: "text"; text: string };
-
-/** Is this the Claude Code preamble already, as the FIRST system block? */
-const firstBlockIsPreamble = (system: unknown): boolean => {
-  if (typeof system === "string") return system === CLAUDE_CODE_SYSTEM_PREAMBLE;
-  if (Array.isArray(system)) {
-    const first = system[0] as { type?: unknown; text?: unknown } | undefined;
-    return first?.type === "text" && first.text === CLAUDE_CODE_SYSTEM_PREAMBLE;
-  }
-  return false;
-};
-
-/**
- * Ensure an Anthropic-wire body's `system` leads with the Claude Code preamble
- * block (see {@link CLAUDE_CODE_SYSTEM_PREAMBLE}). Idempotent: a body that
- * already leads with it (a real Claude Code client) is returned untouched. The
- * originator's own system content is PRESERVED as the following block(s) — a
- * string becomes the second block; an existing block array is prepended to.
- */
-export const ensureClaudeCodeSystemPreamble = (body: unknown): unknown => {
-  if (typeof body !== "object" || body === null) return body;
-  const record = body as Record<string, unknown>;
-  const system = record.system;
-  if (firstBlockIsPreamble(system)) return body;
-  const preamble: TAnthropicSystemBlock = {
-    type: "text",
-    text: CLAUDE_CODE_SYSTEM_PREAMBLE,
-  };
-  const rest: TAnthropicSystemBlock[] =
-    typeof system === "string" && system.length > 0
-      ? [{ type: "text", text: system }]
-      : Array.isArray(system)
-        ? (system as TAnthropicSystemBlock[])
-        : [];
-  return { ...record, system: [preamble, ...rest] };
-};
 
 /** The client's upstream wire, derived from the surface it hit. `responses`
  *  rides the OpenAI family for the passthrough decision (it never passes
@@ -153,10 +113,18 @@ export const buildUpstreamBody = (
   // `isOAuth && upstreamWire === "anthropic"`.
   oauthAnthropicPreamble?: boolean,
 ): unknown => {
+  // Layered finish — ALL system-prompt injections live in
+  // `./prompt-prefix`: (1) vendor-required Claude Code preamble (must
+  // stay the FIRST system block), then (2) the gateway prompt prefix
+  // (`GATEWAY_PROMPT_PREFIX` from `@openllmsh/protocol`), injected into
+  // EVERY upstream chat body, slotted after the preamble when present.
   const withClaudePreamble = (upstreamBody: unknown): unknown =>
-    oauthAnthropicPreamble === true && upstreamWire === "anthropic"
-      ? ensureClaudeCodeSystemPreamble(upstreamBody)
-      : upstreamBody;
+    injectGatewayPromptPrefix(
+      upstreamWire,
+      oauthAnthropicPreamble === true && upstreamWire === "anthropic"
+        ? ensureClaudeCodeSystemPreamble(upstreamBody)
+        : upstreamBody,
+    );
   // Passthrough: same wire in + out (NEVER for `responses` — its body is
   // Responses-shaped). Only the model id + stream flag are pinned. The
   // Anthropic passthrough additionally normalises adaptive-thinking knobs
