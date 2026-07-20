@@ -53,7 +53,19 @@ export type TMessagesStreamState = {
   thinkingBlockOpen: boolean;
   /** OpenAI tool_calls[i].index → Anthropic content_index. */
   toolCallToContentIndex: Map<number, number>;
-  /** True once any tool_use block has been emitted for this message. */
+  /**
+   * Tool calls seen but not yet OPENED because their `name` is still empty.
+   * Anthropic requires `tool_use.name` at `content_block_start`, and a client
+   * (Claude Code) drops a `tool_use` whose name is `""` — so it never runs the
+   * tool. The OpenAI Responses wire (grok/chatgpt) can split a tool call's
+   * `name` / `id` / argument fragments across separate events, so the first
+   * fragment may carry no name. We buffer `id`/`name`/`args` per OpenAI index
+   * here and open the block the moment a non-empty name arrives (flushing the
+   * buffered args), or belatedly at finish with a synthesized id. Mirrors
+   * CLIProxyAPI's accumulate-until-(name)+belated-open (`openai_claude_response.go`).
+   */
+  pendingToolCalls: Map<number, { id: string; name: string; args: string }>;
+  /** True once any tool_use block has been OPENED (announced) for this message. */
   emittedToolUse: boolean;
   /** Anthropic content_index → still-open flag. */
   openToolContentIndexes: Set<number>;
@@ -106,6 +118,7 @@ export const newMessagesStreamState = (): TMessagesStreamState => ({
   thinkingBlockIndex: null,
   thinkingBlockOpen: false,
   toolCallToContentIndex: new Map(),
+  pendingToolCalls: new Map(),
   emittedToolUse: false,
   openToolContentIndexes: new Set(),
   nextContentIndex: 0,
@@ -226,6 +239,77 @@ const closeAllToolBlocks = (
   // already emitted `content_block_stop` for — Claude Code sees prose +
   // truncated pseudo-tools (e.g. literal `<tool_call>` tail).
   state.toolCallToContentIndex.clear();
+};
+
+/**
+ * Open a tool_use content block for a now-named buffered tool call and flush
+ * any argument fragments accumulated while its name was still empty. The block
+ * stays open (subsequent fragments stream straight through). `id` is
+ * synthesized when the upstream never supplied one, so the block is always
+ * executable. Anthropic content blocks are strictly sequential, so any open
+ * text / tool / thinking block is closed first.
+ */
+const openBufferedToolBlock = (
+  state: TMessagesStreamState,
+  out: TAnthropicStreamEvent[],
+  openAiIndex: number,
+  pending: { id: string; name: string; args: string },
+): number => {
+  closeTextBlock(state, out);
+  closeAllToolBlocks(state, out);
+  closeThinkingBlock(state, out);
+  const contentIndex = state.nextContentIndex;
+  state.nextContentIndex += 1;
+  state.toolCallToContentIndex.set(openAiIndex, contentIndex);
+  state.pendingToolCalls.delete(openAiIndex);
+  state.emittedToolUse = true;
+  state.openToolContentIndexes.add(contentIndex);
+  out.push({
+    type: "content_block_start",
+    index: contentIndex,
+    content_block: {
+      type: "tool_use",
+      id:
+        pending.id !== ""
+          ? pending.id
+          : `toolu_${state.messageId}_${openAiIndex}`,
+      name: pending.name,
+      input: {},
+    },
+  });
+  if (pending.args.length > 0) {
+    out.push({
+      type: "content_block_delta",
+      index: contentIndex,
+      delta: { type: "input_json_delta", partial_json: pending.args },
+    });
+  }
+  return contentIndex;
+};
+
+/**
+ * Belatedly open every still-pending tool call that accumulated a name but was
+ * never opened (its `content_block_start` awaited a non-empty name that only
+ * arrived on the terminal event, or the block was reset mid-stream). Called at
+ * finish so a named-but-unopened tool still reaches the client. Pending calls
+ * that never got a name are dropped (an unnamed tool is unexecutable) — mirrors
+ * CLIProxyAPI's belated-emit that skips `accumulator.Name == ""`.
+ */
+const flushPendingToolBlocks = (
+  state: TMessagesStreamState,
+  out: TAnthropicStreamEvent[],
+): void => {
+  const indexes = [...state.pendingToolCalls.keys()].sort((a, b) => a - b);
+  for (const idx of indexes) {
+    const pending = state.pendingToolCalls.get(idx);
+    if (pending === undefined || pending.name === "") {
+      state.pendingToolCalls.delete(idx);
+      continue;
+    }
+    const contentIndex = openBufferedToolBlock(state, out, idx, pending);
+    out.push({ type: "content_block_stop", index: contentIndex });
+    state.openToolContentIndexes.delete(contentIndex);
+  }
 };
 
 const openTextBlock = (
@@ -434,45 +518,40 @@ export const chunkToMessagesEvents = (
   // Tool-call deltas → open tool_use blocks + input_json_delta events.
   if (deltaToolCalls !== null && deltaToolCalls !== undefined) {
     for (const tc of deltaToolCalls) {
-      let contentIndex = state.toolCallToContentIndex.get(tc.index);
-      if (contentIndex === undefined) {
-        // First sighting of this tool_call. Anthropic's streaming
-        // protocol requires content blocks be strictly sequential
-        // (`start → deltas → stop` per block, never overlapping), and
-        // Claude Code's parser routes input_json_delta events to the
-        // most-recently-opened tool_use block. If we open a second
-        // tool_use while the previous one is still open, every
-        // subsequent partial_json fragment for the SECOND call is
-        // concatenated onto the FIRST one's input — that's exactly
-        // how `Edit` ends up invoked with all three required fields
-        // missing on multi-tool turns. Close text + any open tool
-        // block before starting the new one.
-        closeTextBlock(state, out);
-        closeAllToolBlocks(state, out);
-        closeThinkingBlock(state, out);
-        contentIndex = state.nextContentIndex;
-        state.nextContentIndex += 1;
-        state.toolCallToContentIndex.set(tc.index, contentIndex);
-        state.emittedToolUse = true;
-        state.openToolContentIndexes.add(contentIndex);
-        out.push({
-          type: "content_block_start",
-          index: contentIndex,
-          content_block: {
-            type: "tool_use",
-            id: tc.id ?? "",
-            name: tc.function?.name ?? "",
-            input: {},
-          },
-        });
+      const contentIndex = state.toolCallToContentIndex.get(tc.index);
+      if (contentIndex !== undefined) {
+        // Block already opened — stream this argument fragment straight through.
+        const argFragment = tc.function?.arguments ?? "";
+        if (argFragment.length > 0) {
+          out.push({
+            type: "content_block_delta",
+            index: contentIndex,
+            delta: { type: "input_json_delta", partial_json: argFragment },
+          });
+        }
+        continue;
       }
-      const argFragment = tc.function?.arguments ?? "";
-      if (argFragment.length > 0) {
-        out.push({
-          type: "content_block_delta",
-          index: contentIndex,
-          delta: { type: "input_json_delta", partial_json: argFragment },
-        });
+      // Not opened yet — accumulate id / name / args in the pending buffer.
+      // We CANNOT open a tool_use block until we have a non-empty `name`
+      // (Anthropic requires it at `content_block_start`, and Claude Code
+      // silently drops a nameless tool_use — the sub-agent never spawns). The
+      // Responses wire may deliver name/id/args across separate events, so the
+      // first fragment can be nameless.
+      const pending = state.pendingToolCalls.get(tc.index) ?? {
+        id: "",
+        name: "",
+        args: "",
+      };
+      if (tc.id != null && tc.id !== "") pending.id = tc.id;
+      const fragmentName = tc.function?.name;
+      if (fragmentName != null && fragmentName !== "") {
+        pending.name = fragmentName;
+      }
+      pending.args += tc.function?.arguments ?? "";
+      state.pendingToolCalls.set(tc.index, pending);
+      // The moment we know the name, open the block and flush buffered args.
+      if (pending.name !== "") {
+        openBufferedToolBlock(state, out, tc.index, pending);
       }
     }
   }
@@ -519,6 +598,12 @@ export const chunkToMessagesEvents = (
 
   if (choice?.finish_reason !== null && choice?.finish_reason !== undefined) {
     let finalStopReason = stopReasonFor(choice.finish_reason);
+    // A tool call whose name only arrived on the terminal event (or never
+    // streamed a `content_block_start` because its name stayed empty until
+    // now) is opened + closed here so a named-but-unopened `Task`/`Agent`
+    // call still reaches the client. Runs BEFORE the stop-reason override
+    // below (it sets `emittedToolUse` when it opens a block).
+    flushPendingToolBlocks(state, out);
     // If the upstream emitted tool_call deltas during the stream but
     // wrongly settled on `finish_reason: "stop"`, override to
     // `tool_use`. Without this, Claude Code receives a

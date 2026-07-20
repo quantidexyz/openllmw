@@ -174,11 +174,14 @@ const objectField = (
     : undefined;
 };
 
-const APPLY_PATCH_ITEM_TYPES = new Set([
-  "apply_patch",
-  "apply_patch_call",
-  "custom_tool_call",
-]);
+// apply_patch arrives as a dedicated `apply_patch`/`apply_patch_call` item OR
+// as a `custom_tool_call` NAMED `apply_patch` (Codex). `custom_tool_call` is
+// NOT itself an apply_patch marker — a bare `custom_tool_call` is an ordinary
+// client tool call (see `isCustomToolCallItem`); classifying every one as
+// apply_patch leaked xAI/Grok client tools to the client as an unexecutable
+// apply_patch (→ the tool, e.g. `Task`/`Agent`, never ran). The `name`
+// fallback below still catches a real apply_patch custom_tool_call.
+const APPLY_PATCH_ITEM_TYPES = new Set(["apply_patch", "apply_patch_call"]);
 
 const stringifyJson = (value: unknown): string => {
   if (typeof value === "string") return value;
@@ -197,8 +200,16 @@ const isApplyPatchItem = (item: Record<string, unknown>): boolean => {
   return name === "apply_patch" && applyPatchOperation(item) !== undefined;
 };
 
+// A `custom_tool_call` that is NOT an apply_patch and NOT an x-search server
+// trace is an ordinary client tool call — its arguments ride the JSON `input`
+// string (not `arguments`), mirroring CLIProxyAPI's `xaiCustomToolCallArguments`.
+const isCustomToolCallItem = (item: Record<string, unknown>): boolean =>
+  stringField(item, "type") === "custom_tool_call";
+
 const isToolCallItem = (item: Record<string, unknown>): boolean =>
-  stringField(item, "type") === "function_call" || isApplyPatchItem(item);
+  stringField(item, "type") === "function_call" ||
+  isCustomToolCallItem(item) ||
+  isApplyPatchItem(item);
 
 // ─── provider-executed server search items ───────────────────────────
 // Two Responses-wire shapes report a SERVER-side search the provider ran
@@ -281,8 +292,34 @@ const toolCallId = (item: Record<string, unknown>): string | undefined =>
 const toolCallName = (item: Record<string, unknown>): string | undefined =>
   isApplyPatchItem(item) ? "apply_patch" : stringField(item, "name");
 
+/**
+ * A `custom_tool_call`'s arguments ride the JSON `input` string, not
+ * `arguments`. Coerce to a JSON-object string so the canonical tool call
+ * carries valid `arguments` (mirrors CLIProxyAPI `xaiCustomToolCallArguments`):
+ * a valid JSON object passes through; any other string is wrapped as
+ * `{"input": <text>}`; empty → `{}`.
+ */
+const customToolCallArguments = (item: Record<string, unknown>): string => {
+  const raw = item.input;
+  if (raw === undefined || raw === null) return "";
+  if (typeof raw === "string") {
+    const trimmed = raw.trim();
+    if (trimmed.length === 0) return "";
+    try {
+      const parsed: unknown = JSON.parse(trimmed);
+      if (parsed !== null && typeof parsed === "object") return trimmed;
+    } catch {
+      // not JSON — wrap the text below
+    }
+    return JSON.stringify({ input: raw });
+  }
+  if (typeof raw === "object") return JSON.stringify(raw);
+  return JSON.stringify({ input: raw });
+};
+
 const toolCallArguments = (item: Record<string, unknown>): string => {
   if (isApplyPatchItem(item)) return stringifyJson(applyPatchOperation(item));
+  if (isCustomToolCallItem(item)) return customToolCallArguments(item);
   return stringField(item, "arguments") ?? "";
 };
 
@@ -364,29 +401,40 @@ export const chatGptEventToChunk = (
     }
     if (item !== undefined) captureReasoningItem(state, item);
     const drained = drainUnemittedReasoning(state);
-    if (drained.length > 0) {
+    // Codex-spark: the completed function call lands here with its full
+    // `arguments` (or, for a `custom_tool_call`, its JSON `input`) and never
+    // sent a `.delta`. Finalize so the tool isn't invoked with empty input
+    // (→ tool error → re-issue → loop). This MUST run even when a reasoning
+    // item drained on the SAME event: a pending reasoning item completing
+    // just before the function call's `.done` (grok interleaves reasoning
+    // summaries with tool calls) previously early-returned the reasoning and
+    // DROPPED the tool args, so the sub-agent (`Task`/`Agent`) never spawned.
+    // Both ride ONE chunk (a delta may carry reasoning_items + tool_calls).
+    const toolChunk =
+      item !== undefined && isToolCallItem(item) && !isApplyPatchItem(item)
+        ? finalizeToolArgs(
+            state,
+            numberField(event, "output_index") ?? 0,
+            toolCallArguments(item),
+            options,
+          )
+        : null;
+    if (drained.length > 0 || toolChunk !== null) {
       return {
         ...baseChunk(options),
         choices: [
           {
             index: 0,
-            delta: { reasoning_items: drained },
+            delta: {
+              ...(drained.length > 0 ? { reasoning_items: drained } : {}),
+              ...(toolChunk !== null
+                ? { tool_calls: toolChunk.choices[0]?.delta.tool_calls }
+                : {}),
+            },
             finish_reason: null,
           },
         ],
       };
-    }
-    // Codex-spark: the completed function call lands here with its full
-    // `arguments` and never sent a `.delta`. Finalize so the tool isn't
-    // invoked with empty input (→ tool error → re-issue → loop).
-    if (item !== undefined && isToolCallItem(item) && !isApplyPatchItem(item)) {
-      const outputIndex = numberField(event, "output_index") ?? 0;
-      return finalizeToolArgs(
-        state,
-        outputIndex,
-        stringField(item, "arguments") ?? "",
-        options,
-      );
     }
     return null;
   }
