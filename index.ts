@@ -17,6 +17,7 @@ export * from "./features/context-skip";
 export * from "./lib/canonical/message";
 export * from "./lib/canonical/token-estimate";
 export * from "./lib/encrypted-content";
+export * from "./lib/refusal";
 export * from "./lib/streaming/accumulate";
 export * from "./lib/streaming/peek";
 export * from "./lib/streaming/sse";

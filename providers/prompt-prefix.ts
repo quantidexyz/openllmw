@@ -54,29 +54,50 @@ const firstBlockIsPreamble = (system: unknown): boolean => {
   return false;
 };
 
+/** Is this system block the Claude Code preamble, exactly (any position)? */
+const isExactPreambleBlock = (block: unknown): boolean => {
+  const b = block as { type?: unknown; text?: unknown } | undefined;
+  return b?.type === "text" && b.text === CLAUDE_CODE_SYSTEM_PREAMBLE;
+};
+
+/** Normalise a `system` field to a block array (a non-empty string becomes a
+ *  single text block; anything else that isn't an array becomes empty). */
+const systemToBlocks = (system: unknown): TSystemBlock[] =>
+  typeof system === "string" && system.length > 0
+    ? [{ type: "text", text: system }]
+    : Array.isArray(system)
+      ? (system as TSystemBlock[])
+      : [];
+
 /**
  * Ensure an Anthropic-wire body's `system` leads with the Claude Code preamble
- * block (see {@link CLAUDE_CODE_SYSTEM_PREAMBLE}). Idempotent: a body that
- * already leads with it (a real Claude Code client) is returned untouched. The
- * originator's own system content is PRESERVED as the following block(s) — a
- * string becomes the second block; an existing block array is prepended to.
+ * block (see {@link CLAUDE_CODE_SYSTEM_PREAMBLE}) — and with EXACTLY ONE copy.
+ *
+ * The vendor gates OAuth inference on the preamble being the FIRST system
+ * block. A real Claude Code client already sends it first, but the block it
+ * leads with is not always at index 0 of the RAW inbound `system` (a client or
+ * an intermediary can prepend another block — e.g. a stray header-shaped text
+ * block — pushing the genuine preamble to index 1). Naively prepending a fresh
+ * preamble then produces a DUPLICATE preamble with foreign content wedged
+ * between the two copies. So instead of a first-block-only check we:
+ *   - find every exact preamble block, preserve ONE (keeping its metadata, e.g.
+ *     `cache_control`) and move it to index 0,
+ *   - drop the duplicate exact copies,
+ *   - preserve every other block and their relative order,
+ *   - inject a fresh preamble only when none exists.
+ * Idempotent: a body already leading with a single preamble is unchanged.
  */
 export const ensureClaudeCodeSystemPreamble = (body: unknown): unknown => {
   if (typeof body !== "object" || body === null) return body;
   const record = body as Record<string, unknown>;
-  const system = record.system;
-  if (firstBlockIsPreamble(system)) return body;
-  const preamble: TSystemBlock = {
+  const blocks = systemToBlocks(record.system);
+  const existingPreamble = blocks.find(isExactPreambleBlock);
+  const rest = blocks.filter((b) => !isExactPreambleBlock(b));
+  const lead: TSystemBlock = existingPreamble ?? {
     type: "text",
     text: CLAUDE_CODE_SYSTEM_PREAMBLE,
   };
-  const rest: TSystemBlock[] =
-    typeof system === "string" && system.length > 0
-      ? [{ type: "text", text: system }]
-      : Array.isArray(system)
-        ? (system as TSystemBlock[])
-        : [];
-  return { ...record, system: [preamble, ...rest] };
+  return { ...record, system: [lead, ...rest] };
 };
 
 // ─── 2. Codex default-instructions floor ───────────────────────────────

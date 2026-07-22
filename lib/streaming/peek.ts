@@ -12,11 +12,19 @@ import type { TChatCompletionChunk } from "@openllmsh/protocol";
  */
 
 /** Outcome of peeking a decoded upstream stream's first meaningful event
- *  before committing the client response: the (replayable) chunk stream,
- *  or the rejection that arrived before any output — including a stream
- *  that closed without producing a single event. */
+ *  before committing the client response:
+ *  - `chunks`: the first meaningful event was real output — the
+ *    (replayable) chunk stream is committed to the client;
+ *  - `refusal`: the first meaningful event was a STRUCTURED refusal
+ *    (canonical `finish_reason: "content_filter"`) that preceded any real
+ *    output — the (replayable) chunk stream is still returned so a FINAL
+ *    hop can surface the authentic provider refusal, while a non-final hop
+ *    can discard it and walk;
+ *  - `error`: the rejection that arrived before any output — including a
+ *    stream that closed without producing a single event. */
 export type TPeekedChunks<T> =
   | { readonly kind: "chunks"; readonly chunks: ReadableStream<T> }
+  | { readonly kind: "refusal"; readonly chunks: ReadableStream<T> }
   | { readonly kind: "error"; readonly error: unknown };
 
 /**
@@ -82,7 +90,21 @@ export const isMeaningfulChunk = (chunk: TChatCompletionChunk): boolean => {
 export const peekFirstChunk = async <T>(
   source: ReadableStream<T>,
   isMeaningful: (chunk: T) => boolean = () => true,
-  opts?: { readonly emptyStreamIsError?: boolean },
+  opts?: {
+    readonly emptyStreamIsError?: boolean;
+    /**
+     * Classifies the FIRST meaningful chunk as a structured refusal. When
+     * it returns true the peek resolves `kind: "refusal"` (still with the
+     * replayable stream) instead of `kind: "chunks"`. Evaluated only on
+     * the first meaningful event, so a refusal that arrives AFTER real
+     * output has already committed the response is never reported here —
+     * exactly the pre-output boundary the fallback walk needs. Refusal
+     * thus takes precedence over any usage the same terminal chunk
+     * carries, because we classify the chunk before treating it as
+     * committed output.
+     */
+    readonly isRefusal?: (chunk: T) => boolean;
+  },
 ): Promise<TPeekedChunks<T>> => {
   const reader = source.getReader();
   const buffered: T[] = [];
@@ -120,7 +142,11 @@ export const peekFirstChunk = async <T>(
         return { kind: "chunks", chunks: replayed() };
       }
       buffered.push(r.value);
-      if (isMeaningful(r.value)) return { kind: "chunks", chunks: replayed() };
+      if (isMeaningful(r.value)) {
+        return opts?.isRefusal?.(r.value) === true
+          ? { kind: "refusal", chunks: replayed() }
+          : { kind: "chunks", chunks: replayed() };
+      }
     }
   } catch (error) {
     return { kind: "error", error };
