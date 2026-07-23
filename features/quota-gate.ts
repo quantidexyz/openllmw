@@ -1,4 +1,7 @@
-import type { TProviderUsageSnapshot } from "@openllmsh/protocol";
+import type {
+  TProviderUsageSnapshot,
+  TSubscriptionMeterMatch,
+} from "@openllmsh/protocol";
 import { matchesSubscriptionMeter } from "@openllmsh/protocol";
 
 /** Maximum age for a stale quota snapshot to remain eligible for routing. */
@@ -32,9 +35,7 @@ const stalePoolIsGateable = (
 
 export const quotaGateDecision = (params: {
   readonly snapshot: TProviderUsageSnapshot | null;
-  readonly meter:
-    | { readonly meter_id: string; readonly aliases?: ReadonlyArray<string> }
-    | undefined;
+  readonly meter: TSubscriptionMeterMatch | undefined;
   readonly finalHop: boolean;
   readonly staleCapMs: number;
   readonly now: number;
