@@ -13,6 +13,7 @@ export * from "./adapters/messages/request";
 export * from "./adapters/messages/response";
 export * from "./adapters/messages/streaming";
 export * from "./features/compaction/compaction-text";
+export * from "./features/context-demote";
 export * from "./features/context-skip";
 export * from "./lib/canonical/message";
 export * from "./lib/canonical/token-estimate";
