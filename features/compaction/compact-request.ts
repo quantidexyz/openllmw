@@ -326,6 +326,21 @@ const stripPairedToolResults = (
   return { ...msg, content: kept };
 };
 
+/** True when `msg` carries a `tool_result` block referencing any id in `ids`. */
+const toolResultsReference = (
+  msg: unknown,
+  ids: ReadonlySet<string>,
+): boolean =>
+  isRecord(msg) &&
+  Array.isArray(msg.content) &&
+  msg.content.some(
+    (block) =>
+      isRecord(block) &&
+      block.type === "tool_result" &&
+      typeof block.tool_use_id === "string" &&
+      ids.has(block.tool_use_id),
+  );
+
 /**
  * Drop the oldest droppable messages until the body fits or nothing more can go.
  * Preserves: system prompt, cache prefix, last user turn, and tool-call pairing
@@ -379,9 +394,18 @@ const dropOldestTurns = (
     if (anthropic && isRecord(msg) && msg.role === "assistant") {
       // Anthropic: an assistant `tool_use` pairs with a `tool_result` in a
       // SEPARATE later user message. Drop the assistant turn AND strip its
-      // paired tool_results (dropping a now-empty user turn), preserving the
-      // last-user turn (guarded by the `i >= lastUser` break above).
+      // paired tool_results (dropping a now-empty user turn).
       const useIds = anthropicToolUseIds(msg);
+      // But NOT if any of those tool_uses pair into the PROTECTED last user turn
+      // — dropping the assistant would orphan (or, via stripping, degrade) the
+      // live query. Keep this assistant and move on.
+      if (
+        useIds.size > 0 &&
+        toolResultsReference(survivors[lastUser], useIds)
+      ) {
+        i++;
+        continue;
+      }
       survivors.splice(i, 1);
       if (useIds.size > 0) {
         for (let j = i; j < survivors.length; ) {

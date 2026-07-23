@@ -32,6 +32,17 @@ export type TTokenEncoding = "claude" | "o200k";
 export const DEFAULT_ENCODING: TTokenEncoding = "o200k";
 
 /**
+ * Pick the ruler family for a request surface. `messages` is Anthropic-wire, so
+ * the Claude ruler is the accurate one; `chat_completions` and `responses` are
+ * OpenAI-family (o200k also being the best local stand-in for the tiktoken-
+ * derived Qwen/Kimi/DeepSeek vocabs). Shared by the cloud handler and the daemon
+ * so the same body is measured with the same ruler on both paths.
+ */
+export const encodingForSurface = (
+  surface: "messages" | "chat_completions" | "responses",
+): TTokenEncoding => (surface === "messages" ? "claude" : "o200k");
+
+/**
  * A minimal counter — just the `count(text)` we need — so the rest of the
  * module doesn't couple to `ai-tokenizer`'s class shape.
  */
