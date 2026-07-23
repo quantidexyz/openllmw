@@ -124,7 +124,8 @@ const truncateAnthropicToolResult = (
  * Truncate every `tool_result` block in an Anthropic messages array to
  * `maxChars`, walking oldest→newest. Returns a fresh messages array. The last
  * user turn is left untouched even if it carries a tool_result, so the live
- * query is never degraded.
+ * query is never degraded — and a `cache_control`-bearing message is left
+ * byte-identical so the cached prefix (the ~10x-cost breakpoint) survives.
  */
 const truncateAnthropicToolOutputs = (
   messages: ReadonlyArray<unknown>,
@@ -132,7 +133,12 @@ const truncateAnthropicToolOutputs = (
   lastUserIndex: number,
 ): unknown[] =>
   messages.map((msg, i) => {
-    if (i === lastUserIndex || !isRecord(msg) || !Array.isArray(msg.content)) {
+    if (
+      i === lastUserIndex ||
+      !isRecord(msg) ||
+      !Array.isArray(msg.content) ||
+      hasCacheControl(msg)
+    ) {
       return msg;
     }
     const content = msg.content.map((block) =>
@@ -148,7 +154,9 @@ const truncateAnthropicToolOutputs = (
 /**
  * Truncate the output of every `role:"tool"` message to `maxChars`, oldest→
  * newest, skipping the last user turn. `content` is `string | part[]`; string
- * truncates directly, part-array truncates `text` parts in place.
+ * truncates directly, part-array truncates `text` parts in place. A
+ * `cache_control`-bearing message is left byte-identical so the cached prefix
+ * survives (dropping/altering a breakpoint silently ~10x's token cost).
  */
 const truncateCanonicalToolOutputs = (
   messages: ReadonlyArray<unknown>,
@@ -156,7 +164,12 @@ const truncateCanonicalToolOutputs = (
   lastUserIndex: number,
 ): unknown[] =>
   messages.map((msg, i) => {
-    if (i === lastUserIndex || !isRecord(msg) || msg.role !== "tool")
+    if (
+      i === lastUserIndex ||
+      !isRecord(msg) ||
+      msg.role !== "tool" ||
+      hasCacheControl(msg)
+    )
       return msg;
     const content = msg.content;
     if (typeof content === "string") {
@@ -180,9 +193,10 @@ const truncateCanonicalToolOutputs = (
  * system prompt (canonical only — Anthropic `system` is a top-level field), the
  * last user turn, any message carrying a `cache_control` breakpoint (the cached
  * prefix), and — for canonical — a `tool` result whose paired assistant
- * `tool_call` we'd be keeping (pairing is preserved by dropping the assistant
- * turn and its tool results together, so we compute drop candidates as whole
- * turns below rather than individual messages).
+ * `tool_call` we'd be keeping. Pairing is preserved by dropping the assistant
+ * turn and its tool results together — canonical tool messages by
+ * `tool_call_id`, Anthropic tool_result blocks by `tool_use_id` in a following
+ * user message — so neither shape is left with an orphaned tool result.
  */
 const droppableTurnStart = (messages: ReadonlyArray<unknown>): number => {
   // Skip the leading cache_control-bearing prefix and any system messages.
@@ -216,6 +230,54 @@ const canonicalToolCallIds = (msg: unknown): ReadonlySet<string> => {
     }
   }
   return ids;
+};
+
+/**
+ * The `tool_use` block ids inside an Anthropic assistant message. Unlike the
+ * canonical shape (tool calls on the message), Anthropic tool_use lives in the
+ * `content` block array — and its paired `tool_result` sits in a SEPARATE later
+ * user message (`tool_use.id` ↔ `tool_result.tool_use_id`). So dropping an
+ * assistant message is NOT self-contained: its tool_results must go too, or the
+ * transcript is left with an orphaned tool_result the vendor rejects.
+ */
+const anthropicToolUseIds = (msg: unknown): ReadonlySet<string> => {
+  const ids = new Set<string>();
+  if (isRecord(msg) && Array.isArray(msg.content)) {
+    for (const block of msg.content) {
+      if (
+        isRecord(block) &&
+        block.type === "tool_use" &&
+        typeof block.id === "string"
+      ) {
+        ids.add(block.id);
+      }
+    }
+  }
+  return ids;
+};
+
+/**
+ * Remove the `tool_result` blocks that reference `ids` from a following user
+ * message, returning the rewritten message — or `null` when that empties the
+ * message (caller then drops it whole, mirroring the adapter's empty-turn rule).
+ * Non-tool_result blocks and unrelated tool_results are preserved in place.
+ */
+const stripPairedToolResults = (
+  msg: unknown,
+  ids: ReadonlySet<string>,
+): unknown | null => {
+  if (!isRecord(msg) || !Array.isArray(msg.content)) return msg;
+  const kept = msg.content.filter(
+    (block) =>
+      !(
+        isRecord(block) &&
+        block.type === "tool_result" &&
+        typeof block.tool_use_id === "string" &&
+        ids.has(block.tool_use_id)
+      ),
+  );
+  if (kept.length === 0) return null;
+  return { ...msg, content: kept };
 };
 
 /**
@@ -262,6 +324,26 @@ const dropOldestTurns = (
           ) {
             survivors.splice(j, 1);
           } else {
+            j++;
+          }
+        }
+      }
+      continue;
+    }
+    if (anthropic && isRecord(msg) && msg.role === "assistant") {
+      // Anthropic: an assistant `tool_use` pairs with a `tool_result` in a
+      // SEPARATE later user message. Drop the assistant turn AND strip its
+      // paired tool_results (dropping a now-empty user turn), preserving the
+      // last-user turn (guarded by the `i >= lastUser` break above).
+      const useIds = anthropicToolUseIds(msg);
+      survivors.splice(i, 1);
+      if (useIds.size > 0) {
+        for (let j = i; j < survivors.length; ) {
+          const stripped = stripPairedToolResults(survivors[j], useIds);
+          if (stripped === null) {
+            survivors.splice(j, 1);
+          } else {
+            survivors[j] = stripped;
             j++;
           }
         }

@@ -67,11 +67,18 @@ export const getTokenCounter = async (
   if (cached !== undefined) return cached;
   const inflight = loading.get(encoding);
   if (inflight !== undefined) return inflight;
-  const p = loadEncoding(encoding).then((c) => {
-    counters.set(encoding, c);
-    loading.delete(encoding);
-    return c;
-  });
+  const p = loadEncoding(encoding)
+    .then((c) => {
+      counters.set(encoding, c);
+      return c;
+    })
+    // Clear the in-flight entry on BOTH fulfilment and rejection — otherwise a
+    // failed dynamic import (e.g. a transient module-load error) leaves a
+    // rejected promise cached here forever and every later call re-throws it
+    // instead of retrying.
+    .finally(() => {
+      loading.delete(encoding);
+    });
   loading.set(encoding, p);
   return p;
 };
