@@ -27,7 +27,7 @@ export type TClassifierInput = {
 };
 
 const QUOTA_BODY =
-  /usage limit|quota|billing cycle|upgrade your plan|out of credits|purchase extra usage|insufficient_quota/i;
+  /usage limit|usage balance|balance exhausted|quota|billing cycle|upgrade your plan|out of credits|purchase extra usage|insufficient_quota/i;
 const CONTEXT_OVERFLOW_BODY =
   /maximum (prompt|context) length|exceeds the context window|too many tokens|maximum context length|reduce the length of the messages/i;
 
