@@ -444,6 +444,19 @@ const dropOldestTurns = (
 ): unknown[] => {
   const survivors = [...messages];
   const start = droppableTurnStart(messages);
+  // The tool_call ids belonging to PROTECTED assistant turns (system or
+  // cache_control — kept by the loop below). A `tool` message paired to one of
+  // these must NOT be dropped, or the protected assistant is left with an
+  // orphaned tool_call. Computed once up front because protection doesn't change
+  // as we splice.
+  const protectedToolCallIds = new Set<string>();
+  if (!anthropic) {
+    for (const m of messages) {
+      if (isRecord(m) && m.role === "assistant" && hasCacheControl(m)) {
+        for (const id of canonicalToolCallIds(m)) protectedToolCallIds.add(id);
+      }
+    }
+  }
   // Recompute the protected tail index within `survivors` as we splice.
   let i = start;
   while (i < survivors.length) {
@@ -457,6 +470,17 @@ const dropOldestTurns = (
     if (i >= lastUser) break;
     const msg = survivors[i];
     if (isRecord(msg) && (msg.role === "system" || hasCacheControl(msg))) {
+      i++;
+      continue;
+    }
+    // A canonical `tool` message paired to a PROTECTED assistant must survive.
+    if (
+      !anthropic &&
+      isRecord(msg) &&
+      msg.role === "tool" &&
+      typeof msg.tool_call_id === "string" &&
+      protectedToolCallIds.has(msg.tool_call_id)
+    ) {
       i++;
       continue;
     }

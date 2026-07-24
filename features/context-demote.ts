@@ -32,8 +32,10 @@ export const contextOverflowRequiredTokens = (raw: string): number | null => {
     /maximum (?:prompt|context) length is\s+[\d,]+.*?contains\s+([\d,]+)\s+tokens/i,
     // Anthropic: "prompt is too long: N tokens > M maximum".
     /prompt is too long:\s*([\d,]+)\s*tokens/i,
-    // Kimi/DeepSeek: "token limit: X (requested: N)".
-    /\(requested:\s*([\d,]+)\)/i,
+    // Kimi/DeepSeek: "token limit: X (requested: N)". The "token limit" prefix
+    // is required so an unrelated "(requested: N)" (e.g. a quota / validation
+    // error) is NOT misread as a context overflow.
+    /token limit:?\s*[\d,]+\s*\(requested:\s*([\d,]+)\)/i,
   ];
   for (const pattern of patterns) {
     const match = pattern.exec(raw);
