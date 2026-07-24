@@ -86,12 +86,40 @@ const collectStrings = (v: unknown, out: string[]): void => {
   }
 };
 
-export const estimateBodyTokens = (
+/**
+ * The ROUTING gate — ALWAYS the `chars/4` heuristic, never the BPE.
+ *
+ * This runs on every request (twice in the cloud handler, once per daemon walk),
+ * so it is deliberately arithmetic-only: a string-length walk with no
+ * tokenizer, no allocation of the joined body, and no dependence on whether
+ * some earlier request happened to warm a ruler on this isolate.
+ *
+ * It used to consult {@link peekTokenCounter} and silently upgrade itself to a
+ * real BPE pass once any ruler was warm. That made the hot path's cost — and
+ * its ANSWER — a function of process history: the first oversized request
+ * warmed the module-global counter cache and every later request on that
+ * isolate then paid full tokenization. Accuracy is now opt-in via
+ * {@link estimateBodyTokensExact}, taken only where it changes a decision
+ * (compaction) rather than ambiently everywhere.
+ */
+export const estimateBodyTokens = (body: unknown): number =>
+  Math.ceil(stringCharsFromAny(body) / 4);
+
+/**
+ * The ACCURATE body estimate — the real BPE ruler when `encoding`'s family is
+ * warm, `chars/4` when it isn't. Opt-in and explicit: use it only where the
+ * extra precision changes an outcome and the caller has warmed the ruler
+ * deliberately (the compaction seams do, via `getTokenCounter`).
+ *
+ * Never call this on the per-request routing path — that is
+ * {@link estimateBodyTokens}, and it must stay arithmetic-only.
+ */
+export const estimateBodyTokensExact = (
   body: unknown,
   encoding: TTokenEncoding = DEFAULT_ENCODING,
 ): number => {
   if (peekTokenCounter(encoding) === null) {
-    // Cold isolate — keep the exact historical `chars/4`-over-total behaviour.
+    // Cold — the ruler was never warmed, so fall back to the cheap heuristic.
     return Math.ceil(stringCharsFromAny(body) / 4);
   }
   const parts: string[] = [];
@@ -158,27 +186,38 @@ const anthropicContentText = (content: unknown): string => {
 export const estimateAnthropicInputTokens = (body: unknown): number => {
   if (body === null || typeof body !== "object") return 0;
   // This body is Anthropic-shaped by definition, so the Claude ruler is the
-  // right one when it's warm; cold, `textTokens` falls back to `chars/4`.
+  // right one when it's warm; cold, we fall back to `chars/4`.
   const enc: TTokenEncoding = "claude";
   const b = body as Record<string, unknown>;
-  let total = 0;
+
+  // Gather the model-visible text once. Sections stay SEPARATE because the cold
+  // heuristic rounds per section (and that rounding is a pinned contract).
+  const sections: string[] = [];
   const system = b.system;
-  if (typeof system === "string") total += textTokens(system, enc);
-  else if (Array.isArray(system)) {
-    total += textTokens(anthropicContentText(system), enc);
-  }
+  if (typeof system === "string") sections.push(system);
+  else if (Array.isArray(system)) sections.push(anthropicContentText(system));
   if (Array.isArray(b.messages)) {
     for (const m of b.messages) {
       if (m === null || typeof m !== "object") continue;
-      total += textTokens(
+      sections.push(
         anthropicContentText((m as Record<string, unknown>).content),
-        enc,
       );
     }
   }
   // Tool schemas are billed as input too, and they are not small.
   if (Array.isArray(b.tools) && b.tools.length > 0) {
-    total += textTokens(JSON.stringify(b.tools), enc);
+    sections.push(JSON.stringify(b.tools));
   }
-  return total;
+
+  const counter = peekTokenCounter(enc);
+  if (counter === null) {
+    let total = 0;
+    for (const s of sections) total += textTokens(s, enc);
+    return total;
+  }
+  // Warm — ONE BPE pass over the whole transcript rather than one per message
+  // (a 40-message body used to mean 42 separate tokenizer runs). "\n" is a
+  // boundary the BPE won't merge across, so joining doesn't distort the count.
+  const joined = sections.filter((s) => s.length > 0).join("\n");
+  return joined.length === 0 ? 0 : Math.max(1, counter.count(joined));
 };

@@ -14,12 +14,15 @@
  * forward so the cached prefix and the recent tail survive where the budget
  * allows.
  *
- * Pure and immutable — never mutates the input; returns a fresh body. Reuses the
- * ruler-backed {@link estimateBodyTokens} for the fit check, so on a warm isolate
- * the "does it fit now?" loop is a real tokenizer, not `chars/4`.
+ * Pure and immutable — never mutates the input; returns a fresh body. Uses the
+ * ruler-backed {@link estimateBodyTokensExact} for the fit check, so on a warm
+ * isolate the "does it fit now?" loop is a real tokenizer, not `chars/4`. That
+ * is the OPT-IN estimator: the per-request routing gate deliberately stays on
+ * the cheap heuristic, and compaction asks for exactness because here it
+ * changes what gets cut.
  */
 import type { TTokenEncoding } from "../../lib/canonical/encoding-select";
-import { estimateBodyTokens } from "../../lib/canonical/token-estimate";
+import { estimateBodyTokensExact } from "../../lib/canonical/token-estimate";
 import { COMPACTION_MIN_VISIBLE_TEXT_CHARS } from "./compaction-text";
 
 /**
@@ -655,7 +658,7 @@ export const compactRequestToFit = (
   targetTokens: number,
   encoding?: TTokenEncoding,
 ): TCompactionResult => {
-  const estimate = (b: unknown): number => estimateBodyTokens(b, encoding);
+  const estimate = (b: unknown): number => estimateBodyTokensExact(b, encoding);
 
   const initial = estimate(body);
   if (initial <= targetTokens) {
@@ -719,14 +722,52 @@ export const compactRequestToFit = (
   }
 
   // Pass 2: drop oldest droppable turns.
-  messages = dropOldestTurns(
-    messages,
-    anthropic,
-    (msgs) => estimate(withMessages([...msgs])) <= targetTokens,
-  );
+  //
+  // The fit check runs at the top of EVERY iteration of the drop loop, so
+  // measuring the whole body each time made this quadratic: N drops × a full
+  // re-walk (and re-tokenization) of all N surviving messages. A 400-message
+  // body cost 400+ full-body estimates and ~19 M characters of tokenizer work.
+  //
+  // Instead, cost each message ONCE (memoized by identity) and track the total
+  // as a sum. Every message's text is now walked a single time across the whole
+  // loop. The sum of per-message estimates is not bit-identical to one estimate
+  // over the assembled body (per-part rounding, and the BPE can't merge across
+  // parts), so it is used only to decide WHERE to stop dropping — the exact
+  // whole-body estimate below still decides the reported size and `compacted`,
+  // and if the approximation stopped short we finish the job exactly.
+  const messagelessBody: TRecord = { ...body };
+  delete messagelessBody.messages;
+  const baseCost = estimate(messagelessBody);
+  const costCache = new Map<unknown, number>();
+  const costOf = (m: unknown): number => {
+    const hit = costCache.get(m);
+    if (hit !== undefined) return hit;
+    const c = estimate(m);
+    costCache.set(m, c);
+    return c;
+  };
+  const approxFits = (msgs: ReadonlyArray<unknown>): boolean => {
+    let total = baseCost;
+    for (const m of msgs) total += costOf(m);
+    return total <= targetTokens;
+  };
 
-  const finalBody = withMessages(messages);
-  const finalEst = estimate(finalBody);
+  messages = dropOldestTurns(messages, anthropic, approxFits);
+
+  let finalBody = withMessages(messages);
+  let finalEst = estimate(finalBody);
+  if (finalEst > targetTokens) {
+    // The cheap sum over-estimated and we stopped too early. Finish with the
+    // exact predicate — correctness is preserved, and this path only runs when
+    // the approximation actually fell short.
+    messages = dropOldestTurns(
+      messages,
+      anthropic,
+      (msgs) => estimate(withMessages([...msgs])) <= targetTokens,
+    );
+    finalBody = withMessages(messages);
+    finalEst = estimate(finalBody);
+  }
   return {
     body: finalBody,
     compacted: finalEst <= targetTokens,

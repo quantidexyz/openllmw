@@ -106,10 +106,29 @@ const compareUint8Arrays = (a: Uint8Array, b: Uint8Array): number => {
  * once (string→rank map + sorted binary table); `count` is then allocation-
  * light and never touches a decoder or cache.
  */
+/**
+ * Cap on the per-piece merge-count cache. Real prompts are dominated by a small
+ * recurring vocabulary of pieces, so a few thousand entries captures nearly all
+ * the reuse; the cap is what keeps a pathological input (every piece distinct)
+ * from growing the map without bound. On overflow we clear rather than evict
+ * one-by-one — no LRU bookkeeping on the hot path, and the cache simply refills.
+ */
+const MERGE_COUNT_CACHE_MAX = 8192;
+
 export class BpeCounter {
   private readonly stringRankEncoder = new Map<string, number>();
   private readonly binarySortedEncoder: [Uint8Array, number][] = [];
   private readonly tokenSplitRegex: RegExp;
+  /**
+   * piece → its merged token count. The vendoring note above records that
+   * `gpt-tokenizer`'s LRU merge cache was dropped; that turned out to be the
+   * single largest cost in this core, because `count` re-ran the full merge for
+   * EVERY occurrence of a piece. Prompts repeat pieces heavily (indentation,
+   * common words, punctuation runs), so counting a realistic body did the same
+   * merge thousands of times. A piece's count is a pure function of the piece
+   * and the vocab, so caching it is exact — the counts are unchanged.
+   */
+  private readonly mergeCountCache = new Map<string, number>();
 
   constructor(vocab: TBpeVocab) {
     // forEach skips array holes (unused ranks); we also skip explicit
@@ -146,7 +165,17 @@ export class BpeCounter {
         tokensCount++;
         continue;
       }
-      tokensCount += this.bytePairMergeCount(textEncoder.encode(match));
+      const cached = this.mergeCountCache.get(match);
+      if (cached !== undefined) {
+        tokensCount += cached;
+        continue;
+      }
+      const merged = this.bytePairMergeCount(textEncoder.encode(match));
+      if (this.mergeCountCache.size >= MERGE_COUNT_CACHE_MAX) {
+        this.mergeCountCache.clear();
+      }
+      this.mergeCountCache.set(match, merged);
+      tokensCount += merged;
     }
     return tokensCount;
   }
