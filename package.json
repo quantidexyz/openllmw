@@ -13,7 +13,6 @@
   },
   "dependencies": {
     "@openllmsh/protocol": "workspace:*",
-    "ai-tokenizer": "^1.0.6",
     "effect": ">=3.20.0"
   },
   "license": "BUSL-1.1"

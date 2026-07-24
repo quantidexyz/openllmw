@@ -7,16 +7,16 @@
  * provider to one of these coarse families and pass it in; the map from
  * provider → family lives with the catalog in `packages/api`.
  *
- * Encodings come from `ai-tokenizer` (pure-JS, no WASM — runs unchanged in the
- * Bun-compiled daemon binary, on Vercel, and in the browser). Each encoding
- * file is 2–8 MB uncompressed, so:
- *   - import each submodule SELECTIVELY (`ai-tokenizer/encoding/<name>`), never
- *     the `./encoding` barrel (the barrel pulls every encoding and 4×'s the
- *     bundle — measured 8.1 MB vs 1.9 MB, see the spike FINDINGS);
- *   - load it LAZILY and cache the constructed tokenizer once per isolate, so an
- *     estimate that never runs never pays the parse cost.
+ * The ruler itself is our own count-only BPE core over vendored vocab data —
+ * see `../token-ruler`. It replaced the `ai-tokenizer` dependency: same exact
+ * counts, but a ~15× smaller resident footprint (o200k: +47 MB heap / +42 MB
+ * external → +0.1 MB / +4.8 MB) and no native/WASM glue, so it compiles into
+ * the Bun daemon binary unchanged. This module is a thin family ↔ surface
+ * adapter over that core; the heavy vocab is imported lazily inside the ruler,
+ * so an estimate that never runs never pays the parse cost.
  */
-import { Tokenizer } from "ai-tokenizer";
+import type { TRulerFamily } from "../token-ruler";
+import { __resetRulersForTest, getRuler, peekRuler } from "../token-ruler";
 
 /**
  * The coarse tokenizer families we select between. NOT provider ids — several
@@ -26,8 +26,11 @@ import { Tokenizer } from "ai-tokenizer";
  *                 tiktoken-derived vocabs (Qwen / Kimi / DeepSeek / GLM), which
  *                 land within a few %. The DEFAULT when a caller has no better
  *                 information.
+ *
+ * This is exactly the ruler's {@link TRulerFamily}; the alias keeps the
+ * estimator-facing name stable.
  */
-export type TTokenEncoding = "claude" | "o200k";
+export type TTokenEncoding = TRulerFamily;
 
 export const DEFAULT_ENCODING: TTokenEncoding = "o200k";
 
@@ -44,55 +47,21 @@ export const encodingForSurface = (
 
 /**
  * A minimal counter — just the `count(text)` we need — so the rest of the
- * module doesn't couple to `ai-tokenizer`'s class shape.
+ * module doesn't couple to the ruler's class shape.
  */
 export type TTokenCounter = {
   readonly count: (text: string) => number;
 };
 
-// Per-isolate cache of constructed tokenizers, keyed by family. The dynamic
-// import of the (heavy) encoding data happens once per family, on first use.
-const counters = new Map<TTokenEncoding, TTokenCounter>();
-const loading = new Map<TTokenEncoding, Promise<TTokenCounter>>();
-
-const loadEncoding = async (
-  encoding: TTokenEncoding,
-): Promise<TTokenCounter> => {
-  const mod =
-    encoding === "claude"
-      ? await import("ai-tokenizer/encoding/claude")
-      : await import("ai-tokenizer/encoding/o200k_base");
-  return new Tokenizer(mod);
-};
-
 /**
- * Resolve (and cache) the counter for a family. Async because the encoding data
- * is imported lazily — the first call per family loads a 2–8 MB module, every
- * call after is a Map hit. The in-flight `loading` promise dedupes concurrent
- * first-calls so two requests racing on a cold family don't both parse it.
+ * Resolve (and cache) the counter for a family. Async because the vocab data is
+ * imported lazily — the first call per family builds a ~65k–200k-entry lookup;
+ * every call after is a cache hit. Concurrent first-calls are deduped inside the
+ * ruler.
  */
-export const getTokenCounter = async (
+export const getTokenCounter = (
   encoding: TTokenEncoding,
-): Promise<TTokenCounter> => {
-  const cached = counters.get(encoding);
-  if (cached !== undefined) return cached;
-  const inflight = loading.get(encoding);
-  if (inflight !== undefined) return inflight;
-  const p = loadEncoding(encoding)
-    .then((c) => {
-      counters.set(encoding, c);
-      return c;
-    })
-    // Clear the in-flight entry on BOTH fulfilment and rejection — otherwise a
-    // failed dynamic import (e.g. a transient module-load error) leaves a
-    // rejected promise cached here forever and every later call re-throws it
-    // instead of retrying.
-    .finally(() => {
-      loading.delete(encoding);
-    });
-  loading.set(encoding, p);
-  return p;
-};
+): Promise<TTokenCounter> => getRuler(encoding);
 
 /**
  * Synchronously return an already-loaded counter, or `null` if the family
@@ -103,16 +72,14 @@ export const getTokenCounter = async (
  */
 export const peekTokenCounter = (
   encoding: TTokenEncoding,
-): TTokenCounter | null => counters.get(encoding) ?? null;
+): TTokenCounter | null => peekRuler(encoding);
 
 /**
  * TEST-ONLY: drop the per-isolate warm-counter cache so the estimators fall back
- * to `chars/4` again. The `counters` Map is module-global, so a test that warms
- * a family (via {@link getTokenCounter}) would otherwise leak the warm ruler
- * into every later suite in the same process — making a large-body estimate run
- * the real BPE tokenizer where cold `chars/4` was expected. Call in `afterAll`.
+ * to `chars/4` again. The counter cache is module-global (in the ruler), so a
+ * test that warms a family (via {@link getTokenCounter}) would otherwise leak
+ * the warm ruler into every later suite in the same process. Call in `afterAll`.
  */
 export const __resetTokenCountersForTest = (): void => {
-  counters.clear();
-  loading.clear();
+  __resetRulersForTest();
 };
