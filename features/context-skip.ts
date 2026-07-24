@@ -38,6 +38,46 @@
 export const CONTEXT_SKIP_CONFIDENCE_FACTOR = 1;
 
 /**
+ * Per-provider ruler→vendor-token calibration factor for last-resort compaction.
+ * The local `estimateBodyTokens` ruler (o200k / claude encodings) counts FEWER
+ * tokens than the vendor's own tokenizer for these providers, so a body
+ * "compacted to fit window W" on our ruler can be W × factor real tokens and
+ * still overflow upstream (making the retry fail too — and the one-shot latch
+ * forbids a second attempt). Dividing the compaction target by the factor makes
+ * the compacted body fit the VENDOR's tokenizer, not just ours.
+ *
+ * Seeded from live measurement (docs/audit/2026-07-23-compaction-live-test.md §4):
+ *   - claude_code (Anthropic): vendor counted 299434 vs our 216246 → ×1.385
+ *   - kimi_code (Kimi):        vendor counted 317227 vs our 283969 → ×1.117
+ *   - chatgpt/openai (o200k):  o200k is OpenAI's own encoding → ~1.0
+ * This is the static seed for the catalog-driven Layer-2 calibration the spike
+ * recommended; it should eventually be derived from logged `tokens_in` instead.
+ */
+export const PROVIDER_TOKEN_ESTIMATE_FACTOR: Readonly<Record<string, number>> =
+  {
+    anthropic: 1.4,
+    claude_code: 1.4,
+    kimi_code: 1.12,
+    // OpenAI-family rulers are (near-)exact; no inflation.
+    openai: 1,
+    chatgpt: 1,
+    grok: 1,
+  };
+
+/**
+ * The compaction target for a hop: its input window shrunk by the provider's
+ * calibration factor so a body compacted to this size fits the vendor's real
+ * tokenizer. Unknown providers use 1 (no inflation — fail open).
+ */
+export const compactionTargetFor = (
+  provider: string,
+  window: number,
+): number => {
+  const factor = PROVIDER_TOKEN_ESTIMATE_FACTOR[provider] ?? 1;
+  return Math.floor(window / factor);
+};
+
+/**
  * Should this hop be skipped for context? True only when a later hop
  * remains (the FINAL hop always serves — the real tokenizer must get the
  * last word, never the heuristic estimator), the model's input budget is
