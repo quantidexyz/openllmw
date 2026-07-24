@@ -73,6 +73,94 @@ const hasCacheControl = (v: unknown): boolean => {
 };
 
 /**
+ * The char length of a text value that is either a bare string or a block-array
+ * of `{ type, text }` parts (Anthropic tool_result / canonical tool / Responses
+ * output contents all take one of these two shapes).
+ */
+const textLen = (content: unknown): number => {
+  if (typeof content === "string") return content.length;
+  if (Array.isArray(content)) {
+    let n = 0;
+    for (const part of content) {
+      if (isRecord(part) && typeof part.text === "string")
+        n += part.text.length;
+    }
+    return n;
+  }
+  return 0;
+};
+
+/**
+ * Total chars of truncatable tool output across the body, per surface: Anthropic
+ * `tool_result` contents, canonical `tool` message contents, Responses
+ * `function_call_output` outputs. Used to solve the first-pass truncation cap
+ * from the actual deficit rather than a fixed ladder.
+ */
+const toolOutputChars = (
+  items: ReadonlyArray<unknown>,
+  surface: TCompactionSurface,
+): number => {
+  let n = 0;
+  for (const item of items) {
+    if (!isRecord(item)) continue;
+    if (surface === "messages") {
+      if (Array.isArray(item.content)) {
+        for (const block of item.content) {
+          if (isRecord(block) && block.type === "tool_result") {
+            n += textLen(block.content);
+          }
+        }
+      }
+    } else if (surface === "responses") {
+      if (item.type === "function_call_output") n += textLen(item.output);
+    } else if (item.role === "tool") {
+      n += textLen(item.content);
+    }
+  }
+  return n;
+};
+
+/**
+ * The largest tool-output char cap that trims ~only what the deficit needs.
+ * Truncating every tool output to `cap` removes roughly `total − outputs×cap`
+ * chars; we want to remove `deficitChars ≈ (estimatedTokens − targetTokens) ×
+ * CHARS_PER_TOKEN`. Capping the result at 0.5× the average tool output keeps a
+ * meaningful portion of each output rather than over-shrinking on a small
+ * deficit (the live-test report: a ~9% deficit was destroying ~95% of content).
+ * Returns `null` when there is no tool output to truncate.
+ */
+const CHARS_PER_TOKEN = 4;
+const firstPassCap = (
+  items: ReadonlyArray<unknown>,
+  surface: TCompactionSurface,
+  deficitTokens: number,
+): number | null => {
+  const total = toolOutputChars(items, surface);
+  if (total === 0) return null;
+  const outputs = items.reduce<number>((count, item) => {
+    if (!isRecord(item)) return count;
+    if (surface === "messages")
+      return (
+        count +
+        (Array.isArray(item.content)
+          ? (item.content as unknown[]).filter(
+              (b) => isRecord(b) && b.type === "tool_result",
+            ).length
+          : 0)
+      );
+    if (surface === "responses")
+      return item.type === "function_call_output" ? count + 1 : count;
+    return item.role === "tool" ? count + 1 : count;
+  }, 0);
+  if (outputs === 0) return null;
+  const deficitChars = deficitTokens * CHARS_PER_TOKEN;
+  const keepChars = Math.max(0, total - deficitChars);
+  const cap = Math.ceil(keepChars / outputs);
+  const floorCap = Math.ceil((total / outputs) * 0.5);
+  return Math.max(cap, floorCap, COMPACTION_MIN_VISIBLE_TEXT_CHARS);
+};
+
+/**
  * The result of a compaction attempt. `compacted` is true when the body fits the
  * target budget — either it already did (returned untouched) or it was shrunk to
  * fit. It is false ONLY when compaction could not get it under the target (the
@@ -554,7 +642,13 @@ export const compactRequestToFit = (
   // Responses (ChatGPT / Codex): shape is `{ input: item[] }`, handled by its
   // own item-walk rather than the `messages`-array path.
   if (surface === "responses" && Array.isArray(body.input)) {
-    return compactResponsesBody(body, body.input, targetTokens, estimate);
+    return compactResponsesBody(
+      body,
+      body.input,
+      targetTokens,
+      initial,
+      estimate,
+    );
   }
 
   if (!Array.isArray(body.messages)) {
@@ -570,8 +664,20 @@ export const compactRequestToFit = (
     messages: msgs,
   });
 
-  // Pass 1: truncate tool outputs, tightening the cap each round.
-  for (const cap of TRUNCATION_PASSES) {
+  // Pass 1: truncate tool outputs, trying a deficit-sized cap FIRST (trim ~only
+  // what's needed), then the fixed ladder as a coarser fallback. The deficit is
+  // solved against target × 0.95 so the per-string ceil() rounding + non-tool
+  // overhead in the estimate can't leave the result a hair over the window (the
+  // exact-deficit solve landed 128014 on a 128000 target → fell to the coarse
+  // ladder and over-shrank).
+  const firstCap = firstPassCap(
+    messages,
+    surface,
+    initial - targetTokens * 0.95,
+  );
+  const caps =
+    firstCap === null ? TRUNCATION_PASSES : [firstCap, ...TRUNCATION_PASSES];
+  for (const cap of caps) {
     const lastUser = lastUserTurnIndex(messages);
     messages = anthropic
       ? truncateAnthropicToolOutputs(messages, cap, lastUser)
@@ -612,13 +718,22 @@ const compactResponsesBody = (
   body: TRecord,
   inputItems: ReadonlyArray<unknown>,
   targetTokens: number,
+  initialEstimate: number,
   estimate: (b: unknown) => number,
 ): TCompactionResult => {
   let input: unknown[] = [...inputItems];
   const withInput = (items: unknown[]): TRecord => ({ ...body, input: items });
 
-  // Pass 1: truncate tool outputs, tightening the cap each round.
-  for (const cap of TRUNCATION_PASSES) {
+  // Pass 1: truncate tool outputs, deficit-sized cap first (solved against
+  // target × 0.95 — see the messages arm), then the fixed ladder.
+  const firstCap = firstPassCap(
+    input,
+    "responses",
+    initialEstimate - targetTokens * 0.95,
+  );
+  const caps =
+    firstCap === null ? TRUNCATION_PASSES : [firstCap, ...TRUNCATION_PASSES];
+  for (const cap of caps) {
     const lastUser = lastResponsesUserIndex(input);
     input = truncateResponsesToolOutputs(input, cap, lastUser);
     const est = estimate(withInput(input));
