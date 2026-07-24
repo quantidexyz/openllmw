@@ -19,6 +19,9 @@ export type TRulerFamily = "claude" | "o200k";
 
 const counters = new Map<TRulerFamily, BpeCounter>();
 const loading = new Map<TRulerFamily, Promise<BpeCounter>>();
+// Bumped by __resetRulersForTest so a build() that was in flight at reset time
+// can't repopulate the just-cleared cache (test-only race).
+let cacheGeneration = 0;
 
 const build = async (family: TRulerFamily): Promise<BpeCounter> => {
   const { BpeCounter: Counter } = await import("./bpe-core");
@@ -40,13 +43,18 @@ export const getRuler = (family: TRulerFamily): Promise<BpeCounter> => {
   if (cached !== undefined) return Promise.resolve(cached);
   const inflight = loading.get(family);
   if (inflight !== undefined) return inflight;
+  const generation = cacheGeneration;
   const p = build(family)
     .then((counter) => {
-      counters.set(family, counter);
+      // Only cache if no reset happened while this build was in flight —
+      // otherwise we'd repopulate a just-cleared family with a stale counter.
+      if (generation === cacheGeneration) counters.set(family, counter);
       return counter;
     })
     .finally(() => {
-      loading.delete(family);
+      // Only clear OUR own loading entry: a post-reset getRuler may have
+      // installed a newer in-flight promise we must not delete.
+      if (loading.get(family) === p) loading.delete(family);
     });
   loading.set(family, p);
   return p;
@@ -58,6 +66,7 @@ export const peekRuler = (family: TRulerFamily): BpeCounter | null =>
 
 /** TEST-ONLY: drop the per-isolate counter cache. */
 export const __resetRulersForTest = (): void => {
+  cacheGeneration++;
   counters.clear();
   loading.clear();
 };
