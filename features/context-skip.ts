@@ -66,15 +66,18 @@ export const PROVIDER_TOKEN_ESTIMATE_FACTOR: Readonly<Record<string, number>> =
 
 /**
  * The compaction target for a hop: its input window shrunk by the provider's
- * calibration factor so a body compacted to this size fits the vendor's real
- * tokenizer. Unknown providers use 1 (no inflation — fail open).
+ * calibration factor (so a body compacted to this size fits the vendor's real
+ * tokenizer, not just our ruler) and by the shared context-gate safety factor.
+ * Unknown providers use a calibration factor of 1 (no inflation — fail open).
+ * Single source for BOTH seams (cloud dispatch chain + daemon walker) so the
+ * target can't drift.
  */
 export const compactionTargetFor = (
   provider: string,
   window: number,
 ): number => {
   const factor = PROVIDER_TOKEN_ESTIMATE_FACTOR[provider] ?? 1;
-  return Math.floor(window / factor);
+  return Math.floor((window / factor) * CONTEXT_SKIP_CONFIDENCE_FACTOR);
 };
 
 /**
